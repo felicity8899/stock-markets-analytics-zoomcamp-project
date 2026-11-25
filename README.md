@@ -332,6 +332,19 @@ all tested, none adopted. Volatility is directionless and the model's
 edge is magnitude; the MU pattern is a regime problem, and the Phase 4
 regime filter is the tool for it.
 
+**Model-layer test: vol-trend features (added, tested, reverted).**
+Two new features — `vol_trend` (vol_4w / vol_12w) and `ret_vol12`
+(ret_12w / vol_12w) — were added to the model and re-run through the
+same walk-forward. AUC did not move (RF 0.579 vs 0.581, XGB 0.578 vs
+0.576), but Strategy A fell from +561.9% to +401.5% (Sharpe 1.21 →
+1.06, Sortino 2.06 → 1.71). RF importances show why: the new features
+rank mid-pack (10th and 12th of 33) but repackage information already
+in the model — `ret_vol12` is ret_12w rescaled, `vol_trend` is a ratio
+of two features already present — so they dilute the splits and
+reshuffle the top-5 without adding signal. The features were reverted;
+a verification run reproduced the 31-feature baseline exactly. Full
+write-up: [LEARNING_NOTES.md](LEARNING_NOTES.md) §8.
+
 **MU pick statistics — the problem is the regime, not the stock.**
 Over the full five-year walk-forward, raw-score MU picks were actually
 good: picked in 90 of 260 weeks, mean next-week return +2.84%, win

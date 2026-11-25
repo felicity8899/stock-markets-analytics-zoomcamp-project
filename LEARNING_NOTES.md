@@ -716,6 +716,71 @@ name-order split, now confirmed out-of-sample.
 
 ---
 
+## 8. Vol-trend features at the model layer: also a negative result (Phase 5)
+
+### The question
+
+Phase 5's first three tests all worked at the *strategy layer* (same
+model, different selection or sizing). The remaining idea was to fix
+the MU pattern at the *model layer*: give the RF two new features so
+it can learn the vol story itself — `vol_trend` = vol_4w / vol_12w
+(is volatility rising or falling?) and `ret_vol12` = ret_12w /
+vol_12w (12-week return per unit of vol, a Sharpe-like momentum
+signal). Both are point-in-time correct (only past returns enter);
+a zero 12-week vol fills with the neutral values (trend 1.0,
+momentum 0.0). The feature count went from 31 to 33 (22 numeric +
+11 month dummies).
+
+### The numbers (same walk-forward: market-cap universe, 20 folds, 260 weeks)
+
+| Model / strategy | 31 features (baseline) | 33 features (+ vol_trend, ret_vol12) |
+|---|---|---|
+| RF mean AUC | 0.581 | 0.579 |
+| XGB mean AUC | 0.576 | 0.578 |
+| FF mean AUC | 0.569 | 0.569 (unchanged — FF uses only factor columns) |
+| Strategy A pooled total | +561.9% | +401.5% |
+| Strategy A CAGR | +45.9% | +38.1% |
+| Strategy A Sharpe | 1.21 | 1.06 |
+| Strategy A Sortino | 2.06 | 1.71 |
+| Strategy A max DD | −43.4% | −42.0% |
+| MU picks (raw, 260 wks) | 90, +2.84%, 61.1% win | 84, +2.25%, 57.1% win |
+
+The AUCs are flat (RF −0.002, XGB +0.002 — noise), but the strategy
+return falls by 160 pp. This is the §5 phenomenon again — same AUC,
+different returns: the classification quality overall did not change,
+but the ranking *at the top*, which is what the strategy trades on,
+shuffled enough to cost a lot of return. The MU picks got slightly
+worse too (fewer picks, lower mean, lower win rate).
+
+### Why they do not help
+
+RF feature importances on the 80/20 train split show the new features
+are used but carry no new information: `ret_vol12` ranks 10th of 33
+(0.0477) and `vol_trend` 12th (0.0471), in a pack with ret_4w
+(0.0476), ret_1w (0.0469) and rsi_14 (0.0447) — and the importances
+are flat across all price features (0.065 max). `ret_vol12` is
+ret_12w rescaled (ret_12w itself ranks 5th at 0.0513); `vol_trend`
+is a ratio of two features already in the model (vol_12w ranks 1st,
+vol_4w 3rd). The model already *has* the vol information; giving it
+the same information in a second form only dilutes the splits — with
+random feature sampling at each split, near-duplicate features spread
+the trees' attention and reshuffle the top-5. A feature earns its
+place by adding information the model does not already have, not by
+repackaging what is there.
+
+### Decision: reverted
+
+The two features were removed from `features.py` after the test, and
+a verification walk-forward reproduced the 31-feature baseline
+exactly (RF AUC 0.581, Strategy A +561.94%, Sharpe 1.21 — the runs
+are deterministic, `random_state=42`, so the reproduction is exact,
+not approximate). The experiment is recorded here so it is not
+re-tried blindly. The code to re-add them is two lines in
+`_ticker_features` plus two entries in `NUMERIC`; the numbers above
+are the reason not to.
+
+---
+
 ## Talking points (for presenting the project)
 
 1. "The model has a real but modest edge: mean walk-forward AUC 0.58
@@ -765,3 +830,9 @@ name-order split, now confirmed out-of-sample.
    damage because it keeps the model's picks, but it cannot fix a
    regime problem either. The vol line is closed: division, cap, and
    sizing all tested, none adopted."
+13. "Two vol-trend features at the model layer (vol_4w/vol_12w and
+   12-week return per unit of vol) were also tested and reverted: AUC
+   did not move (RF 0.579 vs 0.581) but the strategy return fell 160 pp
+   (+562% to +401%). They repackage information the model already has
+   — a feature earns its place by adding new information, not by
+   restating old information in a second form."

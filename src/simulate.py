@@ -37,6 +37,12 @@ weekly returns frame) and ``benchmark_weekly`` (the SPY weekly return
 series), which the walk-forward validation in ``walkforward.py`` uses to
 report stability across calendar windows and folds.
 
+Phase 4 adds a regime-filter overlay: ``simulate`` accepts an
+``exposure`` series (1.0 = invested, 0.0 = cash) indexed by week. An
+out week holds cash at 0% return; liquidating into cash and re-entering
+both count as one-way turnover of 1.0 (matching the first-week
+convention), so the filter's switching costs are charged, not ignored.
+
 Benchmark: SPY buy-and-hold over the same test weeks.
 
 Metrics: total return, CAGR, Sharpe ratio (annualised, rf = 0), max
@@ -100,6 +106,7 @@ def simulate(
     score_threshold: float | None = None,
     cost_bps: float = TRADING_COST_BPS,
     hrp_lookback_weeks: int = 26,
+    exposure: pd.Series | None = None,
 ) -> tuple[dict, pd.DataFrame]:
     """Run a vector backtest over the scored test panel.
 
@@ -114,10 +121,19 @@ def simulate(
         with no eligible stock hold cash (0 return that week).
     cost_bps : one-way transaction cost in basis points.
     hrp_lookback_weeks : trailing window for the HRP covariance.
+    exposure : optional Phase 4 regime-filter series (1.0 = invested,
+        0.0 = cash), indexed by week date. An out week holds cash at 0%
+        return. Liquidating into cash counts as one-way turnover 1.0
+        (selling 100% of capital -- the same convention as the first
+        week, where investing from cash counts 1.0); staying in cash
+        costs nothing; re-entering counts 1.0 via the usual
+        ``prev_weights is None`` path. Weeks missing from the series
+        default to invested (1.0).
 
     Returns
     -------
-    (metrics dict, weekly DataFrame with date, ret, turnover, holdings).
+    (metrics dict, weekly DataFrame with date, ret, turnover, holdings,
+    exposure).
     """
     if strategy not in {"equal", "hrp"}:
         raise ValueError("strategy must be 'equal' or 'hrp'")
@@ -127,6 +143,24 @@ def simulate(
     prev_picks: pd.DataFrame | None = None
 
     for date, week in panel.groupby("date", sort=True):
+        exp = 1.0
+        if exposure is not None:
+            exp = float(exposure.get(pd.Timestamp(date), 1.0))
+        if exp <= 0.0:
+            # Regime filter (Phase 4): out of the market this week --
+            # hold cash at 0% return. The only P&L is the cost of
+            # liquidating (if we were invested); a week already in cash
+            # trades nothing.
+            turnover = 1.0 if prev_weights is not None else 0.0
+            cost = turnover * cost_bps / 10_000.0
+            weekly_rows.append(
+                {"date": date, "ret": -cost, "gross_ret": 0.0,
+                 "turnover": turnover, "exposure": 0.0,
+                 "holdings": "", "n_holdings": 0}
+            )
+            prev_weights, prev_picks = None, None
+            continue
+
         eligible = week
         if score_threshold is not None:
             eligible = week[week["score"] >= score_threshold]
@@ -134,7 +168,7 @@ def simulate(
         if picks.empty:
             weekly_rows.append(
                 {"date": date, "ret": 0.0, "turnover": 0.0,
-                 "holdings": "", "n_holdings": 0}
+                 "exposure": exp, "holdings": "", "n_holdings": 0}
             )
             prev_weights, prev_picks = None, None
             continue
@@ -169,6 +203,7 @@ def simulate(
             "ret": net_ret,
             "gross_ret": gross_ret,
             "turnover": turnover,
+            "exposure": exp,
             "holdings": ",".join(tickers),
             "n_holdings": len(tickers),
         })

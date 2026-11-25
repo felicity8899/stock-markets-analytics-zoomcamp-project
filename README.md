@@ -30,6 +30,7 @@ strategies in industry.
 | Models | RandomForest baseline, Fama-French-style factor regression (Ridge), XGBoost, LSTM (Phase 2) | RF is the 2026 course best config; the factor regression is the interpretable industry-style baseline; XGBoost is the gradient-boosting comparison; the LSTM is the deep-learning comparison on panel sequences |
 | Allocation | Equal weight vs Hierarchical Risk Parity (HRP) | HRP (López de Prado 2016) needs no expected returns and no covariance inversion, so weights are stable out-of-sample |
 | Strategies | Long-only (equal / HRP) + long-short (Phase 2) | Long-short (long top 5 / short bottom 5, dollar-neutral) tests whether the model identifies losers as well as winners, and hedges market risk |
+| Risk overlay | 200-day MA regime filter (Phase 4, Faber 2007) | Invested when SPY is above its 200-day MA, cash when below — gates *whether* the long-only strategy is invested, not which stocks it picks; cuts the 2022 drawdown by more than half |
 | Simulation | Vector backtest + exact row-by-row simulation (Phase 2) | The exact engine tracks capital/positions/cash in dollars and reinvests gains; it must reconcile with the vector backtest (gap < 0.05 pp) |
 | Benchmark | SPY buy-and-hold | The realistic alternative for the same capital |
 | Costs | 5 bps one-way on traded notional + 2%/yr borrow fee on the short leg (Phase 3) | Keeps the backtest honest; the fee is reported side by side with the no-fee run so its drag is visible |
@@ -39,7 +40,7 @@ strategies in industry.
 
 ```
 ├── README.md
-├── LEARNING_NOTES.md        # Phase 3 learning write-up (walk-forward, borrow fees, HRP, stability)
+├── LEARNING_NOTES.md        # Phase 3-4 learning write-up (walk-forward, borrow fees, HRP, stability, trend following)
 ├── requirements.txt
 ├── Dockerfile               # containerised weekly run (build-untested: no Docker in the dev VM)
 ├── .dockerignore
@@ -51,7 +52,8 @@ strategies in industry.
 │   ├── models.py            # RandomForest, FF factor regression, XGBoost
 │   ├── lstm_model.py        # LSTM comparison model (Phase 2; needs tensorflow)
 │   ├── hrp.py               # Hierarchical Risk Parity (from scratch, scipy)
-│   ├── walkforward.py       # Phase 3 walk-forward validation (expanding window, per-fold AUC + strategy metrics)
+│   ├── walkforward.py       # Phase 3 walk-forward validation (expanding window, per-fold AUC + strategy metrics); Phase 4 filtered comparison
+│   ├── regime.py            # Phase 4 200-day MA regime filter (Faber 2007): daily SPY, weekly exposure, current state
 │   └── simulate.py          # vector backtest, long-short (+ borrow fee, Phase 3), exact simulation, benchmark, grouped metrics
 ├── scripts/
 │   ├── build_notebooks.py   # generates the notebooks in notebooks/
@@ -77,6 +79,9 @@ python main.py --tickers 50 --years 5 # fuller run
 python main.py --universe market-cap  # largest stocks first (not name order)
 python main.py --tickers 50 --years 8 --walk-forward  # Phase 3 walk-forward validation
 python main.py --borrow-fee 0.05      # stress-test the short leg at 5%/yr borrow fee
+python main.py --tickers 50 --years 8 --walk-forward --regime-filter  # Phase 4: 200-day MA
+                                                             # regime filter on Strategy A
+                                                             # (filtered vs unfiltered + 1% band)
 ```
 
 Data is downloaded from yfinance and the Ken French data library on first
@@ -138,6 +143,79 @@ Docker, the same weekly run works from cron: `scripts/weekly_run.sh`
 refreshes data, retrains, and logs to `logs/weekly_YYYY-MM-DD.log`;
 `scripts/crontab.example` documents the Monday 08:00 ET crontab line.
 No live cron job is installed by this project -- install it deliberately.
+
+## Results (Phase 4)
+
+Phase 4 adds a market-timing overlay to Strategy A: the 200-day
+moving-average regime filter (Faber 2007). Each week the portfolio is
+invested only if SPY closed above its 200-day MA on the prior Friday;
+otherwise it holds cash at 0% (no T-bill yield modelled). The filter
+gates *whether* the strategy is invested, never *which* stocks it
+picks, and the decision uses only closes available at Friday's close
+(no lookahead — verified by an independent manual recomputation of the
+MA at seven switch dates, see `src/regime.py`). Switching costs are
+charged: liquidating and re-entering each count as one-way turnover of
+1.0. Full explanation with the numbers as worked examples:
+[LEARNING_NOTES.md](LEARNING_NOTES.md) §6.
+
+### Walk-forward: filtered vs unfiltered Strategy A (same 20 folds)
+
+Run 2026-11-25: same 20-fold walk-forward as Phase 3 (50 tickers, 8
+years, 260 out-of-sample weeks, Nov 2021 – Nov 2026), with Strategy A
+simulated twice per fold — once unfiltered, once with the filter. The
+unfiltered leg reproduces Phase 3 (pooled +244.4% vs +245.0%, Sharpe
+0.91, max DD −46.3% vs −46.9% — the small drift is the documented
+fresh-download wobble, not a code change).
+
+| Pooled (260 weeks) | Unfiltered | + 200d MA filter | + filter, 1% band |
+|---|---|---|---|
+| Total return | +244.4% | **+250.8%** | +233.7% |
+| CAGR | +28.1% | **+28.5%** | +27.3% |
+| Sharpe | 0.91 | **1.09** | 1.05 |
+| Max drawdown | −46.3% | **−28.5%** | −29.5% |
+| Win rate (pooled) | 56.2% | 45.0% | — |
+| Win rate (invested weeks only) | 56.2% | **57.9%** | — |
+| Avg turnover | 0.464 | 0.395 | — |
+| Weeks invested | 100% | 77.7% (202/260) | 77.7% |
+| Exposure switches | — | 16 | 14 |
+
+The filter's value is the drawdown cut (−46.3% → −28.5%, an 18 pp
+improvement) and the Sharpe gain (0.91 → 1.09), not the return — the
++6.4 pp total-return gain over five years is small and within noise.
+The pooled win rate *falls* for the filtered variant (45.0%) only
+because cash weeks (0% return) count as non-wins; on invested weeks
+alone the win rate is 57.9%, slightly above the unfiltered 56.2%.
+
+Filtered Strategy A by calendar year (vs unfiltered):
+
+| Year | Weeks | Invested | Filtered total | Unfiltered total | Filtered max DD | Unfiltered max DD |
+|---|---|---|---|---|---|---|
+| 2021 | 7 | 100% | +4.0% | +4.0% | −1.3% | −1.3% |
+| 2022 | 52 | 17% | **−20.2%** | −43.5% | **−19.5%** | −45.2% |
+| 2023 | 52 | 94% | +16.8% | +39.4% | −23.1% | −21.0% |
+| 2024 | 53 | 100% | +49.6% | +49.6% | −22.0% | −22.0% |
+| 2025 | 52 | 83% | +83.3% | +100.9% | −14.3% | −24.7% |
+| 2026 | 44 | 93% | +31.9% | +39.8% | −12.5% | −12.5% |
+
+2022 is where the filter earns its keep: out for 43 of 52 weeks, it
+more than halves the year's loss (−20.2% vs −43.5%) and drawdown
+(−19.5% vs −45.2%). The cost shows up in 2023 and 2025: the filter was
+out during rebounds (Oct 2023: out one week, missed the +5.8% SPY
+rebound week; Mar–May 2025: out nine weeks, missed the April rebound),
+so filtered 2023 returns less than half the unfiltered year. That
+lag/whipsaw cost is the price of the drawdown protection, and it is
+real — see LEARNING_NOTES.md §6.
+
+**The 1% hysteresis band did not help.** It cut switches from 16 to 14
+but returned less (+233.7% vs +250.8%), with a slightly lower Sharpe
+(1.05 vs 1.09) and slightly worse drawdown (−29.5% vs −28.5%). The
+band's delayed entries and exits cost more than the two avoided
+whipsaws saved. Reported as a negative result, not hidden.
+
+**Current state (as of 2026-11-23): OUT (cash).** SPY $722.29 vs
+200-day MA $730.47 (−1.1%). The filter flipped out in the week of Nov
+16 (Friday Nov 20 close $689.81 vs MA $730.29) and has stayed out since.
+Run `python main.py --regime-filter` for the live state.
 
 ## Results (Phase 3)
 
@@ -320,6 +398,17 @@ RF AUC 0.556, XGBoost 0.508; Strategy A +17.3% vs SPY +1.7%.
   follow-ups.
 - **Short backtest.** An 8-year history leaves 5 years of
   out-of-sample weeks; results are indicative, not proof of an edge.
+- **Regime filter (Phase 4).** Cash weeks earn 0% — no T-bill yield is
+  modelled, so the filtered return is slightly understated (by roughly
+  the T-bill rate × the 22% of weeks spent in cash). The filter's
+  benefit is measured on one 5-year out-of-sample window that contains
+  a single bear market (2022); the drawdown cut is the robust result,
+  the small total-return gain (+6.4 pp over five years) is within
+  noise. The pooled win rate is not comparable between filtered and
+  unfiltered runs (cash weeks count as non-wins) — use the
+  invested-weeks win rate (57.9% vs 56.2%) instead. The current
+  filter state is a weekly signal, not a recommendation: it says
+  whether the trend rule is in or out, not where the market goes next.
 
 ## TODO / Phase 3
 
@@ -343,8 +432,13 @@ RF AUC 0.556, XGBoost 0.508; Strategy A +17.3% vs SPY +1.7%.
       via `FRED_API_KEY`; yfinance proxies remain the fallback).
 - [x] XGBoost: if it fails to install in an environment, the pipeline
       skips it cleanly and reports the skip (same for TensorFlow/LSTM).
+- [x] 200-day MA regime filter (Phase 4 -- done: Faber 2007 overlay on
+      Strategy A; walk-forward pooled Sharpe 0.91 -> 1.09, max DD
+      -46.3% -> -28.5%, 2022 loss halved; 1% band variant tested and
+      reported as a negative result; no-lookahead verified by manual
+      recomputation; current state OUT as of 2026-11-23).
 
 Open follow-ups (not started): Docker image build test (needs a machine
 with Docker); rolling-window walk-forward variant; walk-forward HRP
-comparison; LSTM walk-forward run (runtime); a risk overlay
-(volatility targeting / drawdown control) for the 2022-style regime.
+comparison; LSTM walk-forward run (runtime); volatility targeting as a
+second risk overlay (complements the regime filter, which is binary).

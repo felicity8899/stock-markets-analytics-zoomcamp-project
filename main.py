@@ -7,6 +7,8 @@ Usage (from the project root, venv activated)::
     python main.py --universe market-cap    # largest stocks first
     python main.py --walk-forward --years 8 # Phase 3 walk-forward validation
     python main.py --borrow-fee 0.05        # stress-test the short leg at 5%/yr
+    python main.py --walk-forward --years 8 --regime-filter  # Phase 4: 200-day MA
+                                                             # regime filter on Strategy A
 
 Macro source (Phase 3): FRED (DGS10, VIXCLS, T10Y2Y, DGS2) is used when
 the FRED_API_KEY environment variable is set; otherwise the pipeline
@@ -34,6 +36,7 @@ from src import data as data_mod
 from src import features as feat_mod
 from src import lstm_model as lstm_mod
 from src import models as models_mod
+from src import regime as regime_mod
 from src import simulate as sim_mod
 from src import walkforward as wf_mod
 from src.simulate import BORROW_FEE_ANNUAL
@@ -96,6 +99,31 @@ def _load_panel(
     return feat, panel, prices, spy, feature_cols
 
 
+def _regime_exposures(
+    panel: pd.DataFrame,
+    years: int,
+    force_refresh: bool = False,
+) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
+    """Phase 4: daily SPY + regime exposure series aligned to panel weeks.
+
+    Returns (daily, exposure, exposure_band): ``daily`` is the daily SPY
+    frame (for the current-state report), ``exposure`` is the plain
+    200-day MA filter (1.0 = invested, 0.0 = cash) indexed by weekly
+    date, and ``exposure_band`` is the 1% hysteresis-band variant.
+    """
+    daily = regime_mod.download_spy_daily(
+        years=years, force_refresh=force_refresh)
+    weeks = panel["date"].unique()
+    filt = regime_mod.moving_average_regime(daily, weeks)
+    band = regime_mod.moving_average_regime(daily, weeks, band=0.01)
+    exposure = filt.set_index("date")["exposure"]
+    exposure_band = band.set_index("date")["exposure"]
+    print(f"Regime filter: {int(exposure.sum())}/{len(exposure)} panel "
+          f"weeks invested (plain); "
+          f"{int(exposure_band.sum())}/{len(exposure_band)} (1% band).")
+    return daily, exposure, exposure_band
+
+
 def run(
     n_tickers: int = 30,
     years: int = 3,
@@ -106,6 +134,7 @@ def run(
     universe: str = "name",
     force_refresh: bool = False,
     borrow_fee: float = BORROW_FEE_ANNUAL,
+    regime_filter: bool = False,
 ) -> dict:
     # --- 1-2. Data + features + target (shared with walk-forward) -----
     feat, panel, prices, spy, feature_cols = _load_panel(
@@ -134,6 +163,19 @@ def run(
     m_b, _ = sim_mod.simulate(
         test_rf, prices, top_n=top_n, strategy="hrp")
     results["B: RF top-5 HRP-weight"] = m_b
+
+    # 4a0. Phase 4: Strategy A with the 200-day MA regime filter.
+    # The filter gates *whether* the portfolio is invested; the model
+    # picks are unchanged. Out weeks hold cash at 0% (no T-bill yield
+    # modelled); switching costs are charged by the simulation.
+    regime_daily = None
+    if regime_filter:
+        regime_daily, exposure, _ = _regime_exposures(
+            panel, years, force_refresh)
+        m_af, _ = sim_mod.simulate(
+            test_rf, prices, top_n=top_n, strategy="equal",
+            exposure=exposure)
+        results["A (regime-filtered, 200d MA)"] = m_af
 
     # 4a1. Top-10 variants (Phase 3): the fairer HRP test. With only 5
     # holdings, HRP's diversification has little room to work -- the
@@ -244,6 +286,10 @@ def run(
     print("\nBottom-5 (short leg of the long-short strategy):")
     print(shorts.to_string(index=False, float_format=lambda v: f"{v:,.4f}"))
 
+    if regime_daily is not None:
+        # Phase 4: does the filter say in or out this week?
+        print("\n" + regime_mod.describe_current_state(regime_daily))
+
     return {"metrics": results, "latest_picks": picks,
             "latest_shorts": shorts}
 
@@ -282,6 +328,14 @@ def main() -> None:
     parser.add_argument("--initial-train-weeks", type=int, default=104,
                         help="weeks in the first walk-forward training set "
                              "(default: 104 = 2 years)")
+    parser.add_argument("--regime-filter", action="store_true",
+                        help="Phase 4: apply the 200-day MA regime filter "
+                             "(Faber 2007) to Strategy A -- invested when "
+                             "SPY is above its 200-day MA, cash when below. "
+                             "In walk-forward mode this adds the filtered "
+                             "comparison (plus a 1% band variant); in the "
+                             "standard run it adds a filtered Strategy A "
+                             "row and prints the current filter state.")
     args = parser.parse_args()
 
     if args.walk_forward:
@@ -291,12 +345,19 @@ def main() -> None:
         # src/walkforward.py for the documented reasoning.
         _, panel, prices, spy, feature_cols = _load_panel(
             args.tickers, args.years, args.universe, args.force_refresh)
+        exposure = exposure_band = None
+        if args.regime_filter:
+            daily, exposure, exposure_band = _regime_exposures(
+                panel, args.years, args.force_refresh)
+            print(regime_mod.describe_current_state(daily))
         wf_mod.run_walk_forward(
             panel, prices, spy, feature_cols,
             top_n=args.top_n,
             initial_train_weeks=args.initial_train_weeks,
             fold_weeks=args.fold_weeks,
             use_xgb=not args.no_xgb,
+            exposure=exposure,
+            exposure_band=exposure_band,
         )
         return
 
@@ -310,6 +371,7 @@ def main() -> None:
         universe=args.universe,
         force_refresh=args.force_refresh,
         borrow_fee=args.borrow_fee,
+        regime_filter=args.regime_filter,
     )
 
 

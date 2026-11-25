@@ -1,6 +1,6 @@
-# Learning Notes — Phase 3
+# Learning Notes — Phases 3–4
 
-*What this phase teaches, with the project's own numbers as the worked
+*What these phases teach, with the project's own numbers as the worked
 examples. Written for a CFA-level finance background: the finance is
 assumed, the ML-trading-systems reasoning is explained.*
 
@@ -13,6 +13,13 @@ modest ranking edge (AUC ≈ 0.58), strong bull-market returns, and a
 2022 drawdown of −46% that the single split never showed. That is a
 better project to present, not a worse one: the story is now
 *measured*, not *lucky*.
+
+**Phase 4** answers the question Phase 3 raised — *what do you do about
+the −46% drawdown?* — with the industry's simplest risk overlay: a
+200-day moving-average regime filter (Faber 2007). It cuts the pooled
+drawdown to −28.5% and lifts the Sharpe from 0.91 to 1.09, at the price
+of lag and whipsaws that cost real return in 2023 and 2025. Section 6
+walks through the trade-off with the actual numbers.
 
 ---
 
@@ -343,6 +350,179 @@ Three consequences:
 
 ---
 
+## 6. Trend following as a risk overlay: the 200-day MA regime filter
+
+### The idea (Faber 2007)
+
+Phase 3 ended with a problem: Strategy A is a leveraged momentum
+exposure with a −46% pooled drawdown, driven by 2022, when it lost
+three times the market. Section 4's first practical implication was
+that a strategy like this cannot be run at full capital without a
+drawdown control. Phase 4 implements the simplest one in the
+literature — the **200-day moving-average rule** from Faber (2007),
+"A Quantitative Approach to Tactical Asset Allocation":
+
+> Be invested when the market is above its 200-day moving average;
+> hold cash when it is below.
+
+The rule is trend following applied to the *market* rather than to
+individual stocks. It does not predict anything: it reacts. When the
+market has been falling long enough for the price to drop below its
+own 200-day average, the rule assumes the trend has turned and steps
+aside; when the price recovers above the average, it steps back in.
+The 200-day window is the industry-standard long-term trend length —
+long enough to ignore weekly noise, short enough to catch a regime
+change within a few months.
+
+Two things make it the right first overlay for this project:
+
+1. **It attacks the specific failure mode.** The strategy's losses are
+   concentrated in bear markets (2022: −43.5%). A filter that is out
+   during bear markets removes exactly those losses, while leaving the
+   bull-market returns (where the strategy earns its edge) mostly
+   untouched.
+2. **It is a *separate* decision from stock selection.** The filter
+   gates *whether* the portfolio is invested; the model still decides
+   *which* 5 stocks to hold. The two layers can be evaluated
+   independently — and the walk-forward comparison below does exactly
+   that, running the same folds with and without the filter.
+
+### How it is implemented (and why the timing is not lookahead)
+
+The filter is computed in `src/regime.py` from **daily** SPY closes
+(the 200-day MA needs daily data; weekly bars are too coarse). The
+timing convention is the part that matters most, and it is easy to get
+wrong:
+
+- The strategy rebalances at each week's close. The decision for week
+  `t` is made at **Friday's close of week `t`** — using the SPY close
+  of the last trading day of that week and the 200-day MA computed
+  from the 200 closes ending on that same day.
+- The exposure for week `t` then gates the return earned over week
+  `t+1` — the week the strategy would have been invested in. Both
+  inputs are known at the rebalance moment, so nothing from the future
+  enters the decision.
+
+Two details worth noting:
+
+- **Holiday Fridays** are handled by aligning each week's Friday to
+  the last *trading* day on or before it (`merge_asof`, backward). If
+  Friday is a holiday, Thursday's close decides — which is what a live
+  trader would have used.
+- **Verification.** The MA was independently recomputed by hand (the
+  mean of the 200 raw daily closes ending on the decision day) for
+  seven weeks, including both 2022 switch dates and the Nov 2026
+  switch — the manual values match the module exactly (difference
+  0.00). This is the kind of check that is cheap to do and expensive
+  to skip: a one-day alignment error in a filter is a lookahead leak
+  that flatters every result downstream.
+
+Cash weeks earn **0%** (no T-bill yield is modelled — a deliberate
+simplification, disclosed in the README; it slightly *understates*
+the filtered return). Switching costs are charged: liquidating into
+cash and re-entering each count as one-way turnover of 1.0, so the
+16 switches over 260 weeks cost 16 × 5 bps ≈ 0.8 pp in total — small,
+but not zero, and visible in the numbers rather than assumed away.
+
+### The results: what the filter buys, and what it costs
+
+Same 20-fold walk-forward as Phase 3, Strategy A simulated twice per
+fold — once unfiltered, once filtered. The unfiltered leg reproduces
+Phase 3 (+244.4% vs +245.0% pooled), so the comparison is
+apples-to-apples.
+
+| Pooled (260 weeks) | Unfiltered | + 200d MA filter |
+|---|---|---|
+| Total return | +244.4% | **+250.8%** |
+| CAGR | +28.1% | **+28.5%** |
+| Sharpe | 0.91 | **1.09** |
+| Max drawdown | −46.3% | **−28.5%** |
+| Avg turnover | 0.464 | 0.395 |
+| Weeks invested | 100% | 77.7% (202/260) |
+| Exposure switches | — | 16 |
+
+**The drawdown cut is the result.** Max drawdown falls from −46.3% to
+−28.5% — an 18 pp improvement, more than a third of the tail risk
+removed — and the Sharpe rises from 0.91 to 1.09. The total-return gain
+(+6.4 pp over five years) is small and within noise; do not present the
+filter as a return enhancer. It is a risk reducer that happens not to
+cost return in this sample.
+
+**2022 is where the filter earns its keep.** It was out for 43 of 52
+weeks (invested 17%), and the year's loss more than halves: −20.2%
+vs −43.5%, drawdown −19.5% vs −45.2%. The fold detail shows how: fold
+2 (Feb–May 2022) goes from −23.5% to −6.2%, and fold 4 (Aug–Nov 2022)
+from −13.2% to +0.0% — the filter was simply out for the whole quarter.
+The long out-period ran from Apr 11 to Nov 28, 2022: seven months in
+cash while the bear market did its worst.
+
+**But the filter charges for it — in lag and whipsaws.** The filter
+only knows the trend has turned *after* the price has crossed the
+average, so it exits late (after part of the fall) and re-enters late
+(after part of the recovery). Three concrete costs in this sample:
+
+| Year | Unfiltered | Filtered | What happened |
+|---|---|---|---|
+| 2023 | +39.4% | +16.8% | Out for one week in late Oct — the week SPY rebounded +5.8%. The filter exited after the drop (Oct 23: SPY $396 vs MA $406) and re-entered after the rebound had already happened (Oct 30: SPY $419 vs MA $406). One missed week cost most of the year's gap. |
+| 2025 | +100.9% | +83.3% | Out Mar 10 – May 12 (nine weeks), missing the April rebound. Fold 14 (Feb–May 2025) flips from +0.9% to −7.9%. |
+| 2026 | +39.8% | +31.9% | Out Mar 16 – Apr 6 (three weeks), missing part of the spring recovery. Fold 18 drops from +21.9% to +15.0%. |
+
+And the whipsaws: the filter switched 16 times in 260 weeks. Early
+2022 alone had four switches in three months (out Jan 17, in Jan 24,
+out Feb 7, in Mar 14) as the market chopped around its average while
+topping — each switch costs 5 bps and, worse, each re-entry risks
+buying back in just before the next leg down. Fold 5 (Nov 2022 – Feb
+2023) is the ugly case: filtered −11.3% vs unfiltered −0.9%, because
+the filter re-entered in late November and early January during weeks
+when the strategy's picks fell. The filter does not only miss rebounds;
+it sometimes re-enters into declines.
+
+**The 1% hysteresis band did not help.** Adding a band (switch out only
+below MA × 0.99, in only above MA × 1.01) cut switches from 16 to 14 —
+but returned less (+233.7% vs +250.8%), with a slightly lower Sharpe
+(1.05 vs 1.09) and slightly worse drawdown (−29.5% vs −28.5%). The
+band's delayed entries and exits cost more than the two avoided
+whipsaws saved. This is reported as a negative result: a reasonable
+idea, tested, that did not pay in this sample. (With only 16 switches
+to begin with, there was not much whipsaw to remove — the band solves
+a problem this filter barely has.)
+
+### A measurement trap: the win rate
+
+The pooled win rate *falls* with the filter (45.0% vs 56.2%) even
+though returns improve. That is an artifact, not a finding: cash weeks
+return exactly 0%, and 0% is not a win, so 58 cash weeks mechanically
+drag the win rate down. On **invested weeks only**, the win rate is
+57.9% — slightly *above* the unfiltered 56.2%. The lesson generalises:
+any metric that counts weeks must be re-based when a strategy is
+sometimes out of the market, or the comparison is meaningless. (The
+same trap appears in 2022's filtered win rate: 3.9% — two winning
+weeks out of 52 — because 43 weeks were cash. The year's return,
+−20.2% vs −43.5%, is the informative number, not the win rate.)
+
+### The honest caveat
+
+The filter's benefit is measured on one five-year window containing a
+single bear market. The drawdown cut is the robust result — it follows
+directly from being out during the worst months, which the filter did
+by construction. The return gain is within noise, and in a different
+sample (a bear market with faster reversals, or a choppier top) the
+whipsaw costs could exceed the drawdown savings. A second bear market
+in the sample would be needed to make the claim stronger, and the
+history does not contain one. Present the filter as drawdown insurance
+with a known premium (lag + whipsaws), not as a free lunch.
+
+### Current state
+
+As of 2026-11-23 the filter says **OUT (cash)**: SPY $722.29 vs
+200-day MA $730.47 (−1.1%). It flipped out in the week of Nov 16
+(Friday Nov 20 close $689.81 vs MA $730.29) and has stayed out since.
+That is a statement about the trend rule's current position, not a
+forecast — the rule will flip back in when the price recovers above
+the average, whenever that is.
+
+---
+
 ## Talking points (for presenting the project)
 
 1. "The model has a real but modest edge: mean walk-forward AUC 0.58
@@ -361,3 +541,10 @@ Three consequences:
 6. "Strategy-level returns are sensitive to universe and feature
    choices even when AUC is stable — so I report results across
    universes and windows rather than quoting one backtest."
+7. "The 200-day MA regime filter cuts the pooled drawdown from −46%
+   to −28% and lifts the Sharpe from 0.91 to 1.09 — it is drawdown
+   insurance, not a return enhancer: it cost most of 2023's return by
+   missing the October rebound."
+8. "The filter is currently OUT (SPY $722 vs 200-day MA $730 as of
+   Nov 23) — the trend rule says cash until the price recovers above
+   its average."

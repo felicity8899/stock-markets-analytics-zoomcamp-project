@@ -103,6 +103,8 @@ def run_walk_forward(
     initial_train_weeks: int = 104,
     fold_weeks: int = 13,
     use_xgb: bool = True,
+    exposure: pd.Series | None = None,
+    exposure_band: pd.Series | None = None,
 ) -> dict:
     """Run walk-forward validation over the panel.
 
@@ -118,9 +120,22 @@ def run_walk_forward(
     stability) and the SPY benchmark on the same weeks, for the same
     grouping.
 
+    Phase 4 regime filter: if ``exposure`` is given (a weekly 1.0/0.0
+    series from ``src.regime``, aligned to the panel's week dates),
+    Strategy A is additionally simulated with the filter applied, and
+    the filtered pooled metrics, per-year table, whipsaw count, and %
+    of weeks invested are reported side by side with the unfiltered
+    numbers. ``exposure_band`` (the 1% hysteresis-band variant) is
+    reported the same way when given. The filter is point-in-time
+    correct by construction (each week's exposure uses only closes
+    through that week's Friday -- see ``src.regime``), so using the
+    full-period series inside walk-forward introduces no lookahead:
+    no fold's exposure depends on data after that fold's weeks.
+
     Returns a dict with the per-fold AUC table, the per-fold strategy
     table, pooled metrics, per-year tables, and the concatenated weekly
-    out-of-sample returns.
+    out-of-sample returns (plus the filtered equivalents when an
+    exposure series is given).
     """
     weeks = sorted(pd.to_datetime(panel["date"].unique()))
     folds = walk_forward_folds(weeks, initial_train_weeks, fold_weeks)
@@ -140,6 +155,9 @@ def run_walk_forward(
     fold_auc_rows: list[dict] = []
     fold_strategy_rows: list[dict] = []
     oos_weekly: list[pd.DataFrame] = []
+    # Phase 4: filtered Strategy A series (binary filter + band variant).
+    oos_weekly_filt: list[pd.DataFrame] = []
+    oos_weekly_band: list[pd.DataFrame] = []
 
     for i, (train_end, test_end) in enumerate(folds, start=1):
         train = panel[panel["date"] < train_end]
@@ -189,13 +207,34 @@ def run_walk_forward(
         weekly_a["fold"] = label
         oos_weekly.append(weekly_a)
 
+        # --- Phase 4: same fold with the regime filter applied -------
+        # The model training above is shared; only the cheap weekly
+        # simulation is re-run with the exposure series.
+        filt_note = ""
+        if exposure is not None:
+            _, weekly_f = sim_mod.simulate(
+                fold_rf, prices, top_n=top_n, strategy="equal",
+                exposure=exposure)
+            weekly_f = weekly_f.copy()
+            weekly_f["fold"] = label
+            oos_weekly_filt.append(weekly_f)
+            filt_note = (f" | filtered "
+                         f"{sim_mod._metrics(weekly_f['ret'], weekly_f['turnover'])['total_return']:+.1%}")
+        if exposure_band is not None:
+            _, weekly_b = sim_mod.simulate(
+                fold_rf, prices, top_n=top_n, strategy="equal",
+                exposure=exposure_band)
+            weekly_b = weekly_b.copy()
+            weekly_b["fold"] = label
+            oos_weekly_band.append(weekly_b)
+
         print(f"  {label}: {train_end.date()} -> "
               f"{(test_end - pd.Timedelta(weeks=1)).date()} | "
               f"RF AUC {auc_row['RF AUC']:.3f}"
               + (f" | XGB AUC {auc_row['XGB AUC']:.3f}"
                  if "XGB AUC" in auc_row else "")
               + f" | FF AUC {auc_row['FF AUC']:.3f} | "
-              f"Strategy A {m_a['total_return']:+.1%}")
+              f"Strategy A {m_a['total_return']:+.1%}{filt_note}")
 
     auc_table = pd.DataFrame(fold_auc_rows)
     strategy_table = pd.DataFrame(fold_strategy_rows)
@@ -251,7 +290,7 @@ def run_walk_forward(
     print(bench_year.to_string(index=False,
                                float_format=lambda v: f"{v:,.4f}"))
 
-    return {
+    result = {
         "auc_table": auc_table,
         "strategy_table": strategy_table,
         "pooled_metrics": pooled,
@@ -259,3 +298,92 @@ def run_walk_forward(
         "benchmark_per_year": bench_year,
         "oos_weekly": oos,
     }
+
+    # --- Phase 4: regime-filtered comparison --------------------------
+    if exposure is not None and oos_weekly_filt:
+        oos_f = pd.concat(oos_weekly_filt, ignore_index=True)
+        pooled_f = sim_mod._metrics(oos_f["ret"], oos_f["turnover"])
+        pooled_f["strategy"] = "A (walk-forward pooled, regime-filtered)"
+        oos_f["year"] = pd.to_datetime(oos_f["date"]).dt.year
+        per_year_f = sim_mod.grouped_metrics(oos_f, "year")
+
+        # Whipsaw count: exposure switches (in->out or out->in) across
+        # the out-of-sample weeks. Each switch trades the full
+        # portfolio once (5 bps), so the count is also the switching
+        # cost in disguise: switches x 5 bps of extra turnover cost.
+        exp_series = oos_f.sort_values("date")["exposure"]
+        switches = int((exp_series.diff().fillna(0.0) != 0).sum())
+        pct_invested = float(exp_series.mean()) * 100.0
+        # Weeks invested by calendar year (where was the filter out?).
+        invested_by_year = (
+            oos_f.groupby("year")["exposure"].mean() * 100.0
+        ).round(1).to_dict()
+        # Win rate over invested weeks only. The pooled win rate counts
+        # cash weeks (0% return) as non-wins, which mechanically lowers
+        # it for the filtered variant -- the invested-weeks win rate is
+        # the comparable number.
+        invested_weeks = oos_f[oos_f["exposure"] > 0]
+        win_rate_invested = float(
+            (invested_weeks["ret"] > 0).mean()
+        ) if len(invested_weeks) else 0.0
+        filter_stats = {
+            "switches": switches,
+            "pct_weeks_invested": pct_invested,
+            "pct_invested_by_year": invested_by_year,
+            "win_rate_invested_weeks": win_rate_invested,
+        }
+
+        print("\n=== Phase 4: Strategy A with the 200-day MA regime filter ===")
+        print(f"Filter: invested {pct_invested:.1f}% of the "
+              f"{len(oos_f)} out-of-sample weeks, "
+              f"{switches} exposure switches (whipsaws).")
+        print("Invested % by year: "
+              + ", ".join(f"{y}: {v:.0f}%" for y, v in invested_by_year.items()))
+        print(f"Win rate on invested weeks only: "
+              f"{win_rate_invested:.1%} (the pooled win rate counts "
+              f"cash weeks as non-wins -- see LEARNING_NOTES.md).")
+        comp = pd.DataFrame([
+            {"variant": "A unfiltered", **pooled},
+            {"variant": "A + 200d MA filter", **pooled_f},
+        ])
+        show_cols = ["variant", "weeks", "total_return", "cagr",
+                     "sharpe", "max_drawdown", "avg_turnover", "win_rate"]
+        print("\nPooled out-of-sample, filtered vs unfiltered:")
+        print(comp[show_cols].to_string(
+            index=False, float_format=lambda v: f"{v:,.4f}"))
+        print("\n=== Filtered Strategy A by calendar year ===")
+        print(per_year_f.to_string(index=False,
+                                   float_format=lambda v: f"{v:,.4f}"))
+
+        result.update({
+            "pooled_metrics_filtered": pooled_f,
+            "per_year_filtered": per_year_f,
+            "oos_weekly_filtered": oos_f,
+            "filter_stats": filter_stats,
+        })
+
+        if exposure_band is not None and oos_weekly_band:
+            oos_b = pd.concat(oos_weekly_band, ignore_index=True)
+            pooled_b = sim_mod._metrics(oos_b["ret"], oos_b["turnover"])
+            pooled_b["strategy"] = ("A (walk-forward pooled, "
+                                    "regime filter, 1% band)")
+            exp_b = oos_b.sort_values("date")["exposure"]
+            switches_b = int((exp_b.diff().fillna(0.0) != 0).sum())
+            print("\n--- 1% hysteresis-band variant ---")
+            print(f"Band filter: invested "
+                  f"{float(exp_b.mean()) * 100.0:.1f}% of weeks, "
+                  f"{switches_b} switches (vs {switches} for the plain "
+                  f"filter), total {pooled_b['total_return']:+.2%}, "
+                  f"CAGR {pooled_b['cagr']:+.2%}, "
+                  f"Sharpe {pooled_b['sharpe']:.2f}, "
+                  f"max DD {pooled_b['max_drawdown']:.2%}.")
+            result.update({
+                "pooled_metrics_filtered_band": pooled_b,
+                "oos_weekly_filtered_band": oos_b,
+                "filter_stats_band": {
+                    "switches": switches_b,
+                    "pct_weeks_invested": float(exp_b.mean()) * 100.0,
+                },
+            })
+
+    return result

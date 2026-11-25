@@ -1,0 +1,22 @@
+# Data files are never committed (course rule: no data on GitHub).
+# They are re-downloaded from APIs or restored from a Drive link.
+data/
+*.parquet
+*.csv
+*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Secrets / environment
+.env
+.env*
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

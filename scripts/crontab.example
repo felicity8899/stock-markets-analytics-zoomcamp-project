@@ -1,0 +1,13 @@
+# Weekly algo-trading run -- crontab example (Phase 2)
+#
+# Install (edit PROJECT_DIR first, then):
+#   crontab scripts/crontab.example
+#
+# Runs every Monday at 08:00 America/New_York, before the US open.
+# The script itself logs to logs/weekly_YYYY-MM-DD.log; cron output is
+# discarded because the script redirects everything to the log file.
+#
+# NOTE: no live cron job is installed by this project -- this file is
+# documentation only. Install it deliberately if you want the weekly run.
+
+# 0 8 * * 1 cd PROJECT_DIR && ./scripts/weekly_run.sh >/dev/null 2>&1

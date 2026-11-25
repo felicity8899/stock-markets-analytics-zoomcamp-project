@@ -239,7 +239,13 @@ def run(
     print("Top-5 by RandomForest P(top-quintile), retrained on all data:")
     print(picks.to_string(index=False, float_format=lambda v: f"{v:,.4f}"))
 
-    return {"metrics": results, "latest_picks": picks}
+    shorts = latest.nsmallest(top_n, "score")[
+        ["ticker", "close", "score"]]
+    print("\nBottom-5 (short leg of the long-short strategy):")
+    print(shorts.to_string(index=False, float_format=lambda v: f"{v:,.4f}"))
+
+    return {"metrics": results, "latest_picks": picks,
+            "latest_shorts": shorts}
 
 
 def main() -> None:

@@ -107,6 +107,7 @@ def simulate(
     cost_bps: float = TRADING_COST_BPS,
     hrp_lookback_weeks: int = 26,
     exposure: pd.Series | None = None,
+    rank_col: str = "score",
 ) -> tuple[dict, pd.DataFrame]:
     """Run a vector backtest over the scored test panel.
 
@@ -129,6 +130,10 @@ def simulate(
         costs nothing; re-entering counts 1.0 via the usual
         ``prev_weights is None`` path. Weeks missing from the series
         default to invested (1.0).
+    rank_col : column to rank by when selecting the top-N (default
+        ``"score"``). Phase 5: pass a volatility-adjusted ranking such
+        as ``"score_vol4"`` (score / 4-week realised vol) to rank by
+        risk-adjusted score instead of raw model probability.
 
     Returns
     -------
@@ -164,7 +169,7 @@ def simulate(
         eligible = week
         if score_threshold is not None:
             eligible = week[week["score"] >= score_threshold]
-        picks = eligible.nlargest(top_n, "score")
+        picks = eligible.nlargest(top_n, rank_col)
         if picks.empty:
             weekly_rows.append(
                 {"date": date, "ret": 0.0, "turnover": 0.0,

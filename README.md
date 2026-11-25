@@ -31,6 +31,7 @@ strategies in industry.
 | Allocation | Equal weight vs Hierarchical Risk Parity (HRP) | HRP (López de Prado 2016) needs no expected returns and no covariance inversion, so weights are stable out-of-sample |
 | Strategies | Long-only (equal / HRP) + long-short (Phase 2) | Long-short (long top 5 / short bottom 5, dollar-neutral) tests whether the model identifies losers as well as winners, and hedges market risk |
 | Risk overlay | 200-day MA regime filter (Phase 4, Faber 2007) | Invested when SPY is above its 200-day MA, cash when below — gates *whether* the long-only strategy is invested, not which stocks it picks; cuts the 2022 drawdown by more than half |
+| Selection rule | Raw score, or score / vol (Phase 5) | Phase 5 tested ranking the top-5 by score divided by realised vol instead of raw score — a clear negative result (+562% → +23% pooled, Sharpe 1.21 → 0.31); dividing by vol rewards calm stocks that never jump, fighting the model's objective |
 | Simulation | Vector backtest + exact row-by-row simulation (Phase 2) | The exact engine tracks capital/positions/cash in dollars and reinvests gains; it must reconcile with the vector backtest (gap < 0.05 pp) |
 | Benchmark | SPY buy-and-hold | The realistic alternative for the same capital |
 | Costs | 5 bps one-way on traded notional + 2%/yr borrow fee on the short leg (Phase 3) | Keeps the backtest honest; the fee is reported side by side with the no-fee run so its drag is visible |
@@ -56,9 +57,9 @@ strategies in industry.
 │   ├── models.py            # RandomForest, FF factor regression, XGBoost
 │   ├── lstm_model.py        # LSTM comparison model (Phase 2; needs tensorflow)
 │   ├── hrp.py               # Hierarchical Risk Parity (from scratch, scipy)
-│   ├── walkforward.py       # Phase 3 walk-forward validation (expanding window, per-fold AUC + strategy metrics); Phase 4 filtered comparison
+│   ├── walkforward.py       # Phase 3 walk-forward validation (expanding window, per-fold AUC + strategy metrics); Phase 4 filtered comparison; Phase 5 vol-adjusted ranking + MU pick diagnostics
 │   ├── regime.py            # Phase 4 200-day MA regime filter (Faber 2007): daily SPY, weekly exposure, current state
-│   └── simulate.py          # vector backtest, long-short (+ borrow fee, Phase 3), exact simulation, benchmark, grouped metrics
+│   └── simulate.py          # vector backtest, long-short (+ borrow fee, Phase 3), exact simulation, benchmark, grouped metrics; Phase 5 rank_col (rank top-N by any column, e.g. score/vol)
 ├── scripts/
 │   ├── build_notebooks.py   # generates the notebooks in notebooks/
 │   ├── precompute_walkforward.py  # regenerates dashboard_data/walkforward_results.json
@@ -261,6 +262,56 @@ whipsaws saved. Reported as a negative result, not hidden.
 200-day MA $730.47 (−1.1%). The filter flipped out in the week of Nov
 16 (Friday Nov 20 close $689.81 vs MA $730.29) and has stayed out since.
 Run `python main.py --regime-filter` for the live state.
+
+## Results (Phase 5)
+
+Phase 5 tests a fix for the MU finding (2026-11-25): the RF
+persistently ranks the highest-volatility stock #1, and in the
+single-split test window its MU picks lost money (−0.26% mean,
+47% win rate). Instead of changing the model, Phase 5 changes the
+*strategy layer*: same RF scores, same 20 walk-forward folds
+(market-cap universe, 50 tickers, 8 years, 260 out-of-sample weeks),
+but the top-5 are selected by **score / vol** instead of raw score —
+`score / vol_4w` and `score / vol_12w`. Full explanation:
+[LEARNING_NOTES.md](LEARNING_NOTES.md) §7.
+
+| Pooled (260 weeks) | Raw score | score / vol_4w | score / vol_12w |
+|---|---|---|---|
+| Total return | **+561.9%** | +22.6% | +70.2% |
+| CAGR | **+45.9%** | +4.2% | +11.2% |
+| Sharpe | **1.21** | 0.31 | 0.74 |
+| Max drawdown | −43.4% | **−23.1%** | **−19.0%** |
+| Avg turnover | 0.47 | 0.61 | 0.49 |
+| Win rate | 56.2% | 51.5% | 53.9% |
+
+**A clear negative result: do not adopt it.** Dividing by vol crushes
+the return (+562% → +23%/+70%) and the Sharpe (1.21 → 0.31/0.74).
+The drawdown improvement is real but not worth the give-up. The
+mechanism: dividing by vol does not just penalise high-vol stocks, it
+actively *rewards* low-vol stocks — and low-vol stocks almost never
+land in the top return quintile, which is exactly what the model
+predicts. The ranking fights the model's objective. The vol_4w variant
+flatlines in the big up years (2023: +2.0% vs raw +115.7%; 2025: +3.5%
+vs +70.3%) because it holds calm stocks that do not move.
+
+**MU pick statistics — the problem is the regime, not the stock.**
+Over the full five-year walk-forward, raw-score MU picks were actually
+good: picked in 90 of 260 weeks, mean next-week return +2.84%, win
+rate 61.1% (vs MU's +1.19% mean across all 260 weeks). The vol filter
+"fixes" MU by almost never picking it (9 weeks for vol_4w, 2 for
+vol_12w) — including during the years it worked — and the few vol_4w
+picks were mediocre (+1.54%). The MU failures cluster in the 2025–2026
+AI unwind, which is what the Phase 4 regime filter, not the ranking,
+is for. Next candidates if the MU issue is revisited: a vol *cap*
+(exclude the top-vol decile) rather than dividing by vol, or
+vol-weighted position sizing within the top-5.
+
+**Side finding: the market-cap universe is stronger.** Same
+walk-forward setup, market-cap universe: pooled +561.9%, CAGR +45.9%,
+Sharpe 1.21 — versus the name-order universe's +244%, CAGR +28.1%,
+Sharpe 0.91 (Phase 3), at the same mean AUC (0.581 vs 0.580). Mega-cap
+momentum rode the 2023–2026 AI boom. Universe choice moves results
+more than the model does.
 
 ## Results (Phase 3)
 

@@ -39,6 +39,22 @@ covers RF / XGBoost / FF only, and LSTM is reported as
 walk-forward-untested (its single-split AUC is still reported by the
 standard run). This is a runtime choice, not a methodological one.
 
+Phase 5 (volatility-adjusted ranking): the same walk-forward loop also
+simulates Strategy A with the top-N selected by ``score / vol`` instead
+of raw score (``score_vol4`` = score / 4-week realised vol,
+``score_vol12`` = score / 12-week realised vol). The model itself is
+unchanged -- only the *selection* rule changes, so this is a test of
+the strategy layer, not the model. The motivation is the MU finding
+(2026-11-25): the RF persistently ranks the highest-volatility stock
+#1, because high vol makes a stock likely to land in the top return
+quintile, but the realised next-week returns on those picks were
+negative on average. Dividing by vol asks the portfolio to prefer
+"high score *for its volatility*" instead of "high score, full stop".
+MU pick statistics (how often MU was selected, and its realised
+next-week return when selected) are reported per variant, so the
+question "did the vol adjustment fix the MU false picks?" is answered
+directly rather than inferred from the pooled return.
+
 Usage: ``python main.py --walk-forward --years 8`` (8 years of history
 gives enough folds; the default 3 years is too short -- see
 ``run_walk_forward``).
@@ -46,6 +62,7 @@ gives enough folds; the default 3 years is too short -- see
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score
 
@@ -158,6 +175,14 @@ def run_walk_forward(
     # Phase 4: filtered Strategy A series (binary filter + band variant).
     oos_weekly_filt: list[pd.DataFrame] = []
     oos_weekly_band: list[pd.DataFrame] = []
+    # Phase 5: volatility-adjusted ranking variants (same RF scores,
+    # top-N selected by score / vol instead of raw score).
+    oos_weekly_vol4: list[pd.DataFrame] = []
+    oos_weekly_vol12: list[pd.DataFrame] = []
+    # Phase 5: MU pick diagnostics -- one row per OOS week per variant:
+    # MU's rank within the week under that variant's ranking, and its
+    # realised next-week return. A "pick" is rank <= top_n.
+    mu_pick_rows: list[dict] = []
 
     for i, (train_end, test_end) in enumerate(folds, start=1):
         train = panel[panel["date"] < train_end]
@@ -206,6 +231,52 @@ def run_walk_forward(
         weekly_a = weekly_a.copy()
         weekly_a["fold"] = label
         oos_weekly.append(weekly_a)
+
+        # --- Phase 5: same RF scores, top-N by score / vol -----------
+        # The ranking columns are point-in-time correct: vol_4w /
+        # vol_12w use only returns through the week's Friday close,
+        # exactly like every other feature. A zero vol (a stock that
+        # did not move for 4 weeks) would divide by zero, so zeros are
+        # treated as missing -- such a stock ranks last under nlargest.
+        fold_rf["score_vol4"] = (
+            fold_rf["score"]
+            / fold_rf["vol_4w"].replace(0, np.nan)
+        )
+        fold_rf["score_vol12"] = (
+            fold_rf["score"]
+            / fold_rf["vol_12w"].replace(0, np.nan)
+        )
+        for col, bucket in (("score_vol4", oos_weekly_vol4),
+                            ("score_vol12", oos_weekly_vol12)):
+            _, weekly_v = sim_mod.simulate(
+                fold_rf, prices, top_n=top_n, strategy="equal",
+                rank_col=col)
+            weekly_v = weekly_v.copy()
+            weekly_v["fold"] = label
+            bucket.append(weekly_v)
+
+        # --- Phase 5: MU pick diagnostics -----------------------------
+        # For each ranking rule, MU's rank within each week of this
+        # fold and its realised next-week return. The comparison that
+        # matters is not "was MU picked less often" in the abstract,
+        # but "when it was picked, did it lose less / win more".
+        for variant, col in (("raw", "score"),
+                             ("vol4", "score_vol4"),
+                             ("vol12", "score_vol12")):
+            ranked = fold_rf.copy()
+            ranked["rank_in_week"] = (
+                ranked.groupby("date")[col]
+                .rank(ascending=False, method="first")
+            )
+            mu_weeks = ranked[ranked["ticker"] == "MU"]
+            for _, r in mu_weeks.iterrows():
+                mu_pick_rows.append({
+                    "variant": variant,
+                    "date": r["date"],
+                    "rank_in_week": float(r["rank_in_week"]),
+                    "picked": bool(r["rank_in_week"] <= top_n),
+                    "next_ret": float(r["next_ret"]),
+                })
 
         # --- Phase 4: same fold with the regime filter applied -------
         # The model training above is shared; only the cheap weekly
@@ -385,5 +456,80 @@ def run_walk_forward(
                     "pct_weeks_invested": float(exp_b.mean()) * 100.0,
                 },
             })
+
+    # --- Phase 5: volatility-adjusted ranking comparison -------------
+    oos_v4 = pd.concat(oos_weekly_vol4, ignore_index=True)
+    oos_v12 = pd.concat(oos_weekly_vol12, ignore_index=True)
+    pooled_v4 = sim_mod._metrics(oos_v4["ret"], oos_v4["turnover"])
+    pooled_v4["strategy"] = "A (walk-forward pooled, rank by score/vol4)"
+    pooled_v12 = sim_mod._metrics(oos_v12["ret"], oos_v12["turnover"])
+    pooled_v12["strategy"] = "A (walk-forward pooled, rank by score/vol12)"
+    oos_v4["year"] = pd.to_datetime(oos_v4["date"]).dt.year
+    per_year_v4 = sim_mod.grouped_metrics(oos_v4, "year")
+
+    # MU pick statistics per variant. "MU mean next_ret (all OOS
+    # weeks)" is the reference: what MU did on average regardless of
+    # whether the model picked it. If the vol adjustment works, the
+    # picked-weeks mean should move toward (or above) that reference
+    # -- the raw-score failure was picking MU exactly on its bad weeks.
+    mu_df = pd.DataFrame(mu_pick_rows)
+    mu_stats_rows = []
+    mu_all_mean = float(mu_df["next_ret"].mean())
+    for variant in ("raw", "vol4", "vol12"):
+        sub = mu_df[mu_df["variant"] == variant]
+        picked = sub[sub["picked"]]
+        mu_stats_rows.append({
+            "variant": variant,
+            "weeks": len(sub),
+            "picked_weeks": int(len(picked)),
+            "picked_pct": (len(picked) / len(sub) * 100.0) if len(sub) else 0.0,
+            "mean_next_ret_when_picked": (
+                float(picked["next_ret"].mean()) if len(picked) else 0.0
+            ),
+            "win_rate_when_picked": (
+                float((picked["next_ret"] > 0).mean())
+                if len(picked) else 0.0
+            ),
+            "best_picked_week": (
+                float(picked["next_ret"].max()) if len(picked) else 0.0
+            ),
+            "worst_picked_week": (
+                float(picked["next_ret"].min()) if len(picked) else 0.0
+            ),
+        })
+    mu_stats = pd.DataFrame(mu_stats_rows)
+
+    print("\n=== Phase 5: Strategy A with volatility-adjusted ranking ===")
+    print("Same RF scores, same walk-forward folds -- only the top-N "
+          "selection rule changes (raw score vs score / vol).")
+    comp5 = pd.DataFrame([
+        {"variant": "A raw score", **pooled},
+        {"variant": "A score/vol4", **pooled_v4},
+        {"variant": "A score/vol12", **pooled_v12},
+    ])
+    show_cols5 = ["variant", "weeks", "total_return", "cagr",
+                  "sharpe", "max_drawdown", "avg_turnover", "win_rate"]
+    print("\nPooled out-of-sample, ranking rule comparison:")
+    print(comp5[show_cols5].to_string(
+        index=False, float_format=lambda v: f"{v:,.4f}"))
+    print("\n=== A (score/vol4) by calendar year ===")
+    print(per_year_v4.to_string(index=False,
+                                float_format=lambda v: f"{v:,.4f}"))
+    print(f"\nMU mean next-week return over ALL {len(mu_df) // 3} "
+          f"OOS weeks (any variant): {mu_all_mean:+.2%}")
+    print("\n=== MU pick statistics by ranking rule ===")
+    print(mu_stats.to_string(
+        index=False, float_format=lambda v: f"{v:,.4f}"))
+
+    result.update({
+        "pooled_metrics_vol4": pooled_v4,
+        "pooled_metrics_vol12": pooled_v12,
+        "oos_weekly_vol4": oos_v4,
+        "oos_weekly_vol12": oos_v12,
+        "per_year_vol4": per_year_v4,
+        "mu_pick_stats": mu_stats,
+        "mu_pick_rows": mu_df,
+        "mu_mean_next_ret_all_weeks": mu_all_mean,
+    })
 
     return result

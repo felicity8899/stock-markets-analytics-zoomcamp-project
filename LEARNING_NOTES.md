@@ -1,4 +1,4 @@
-# Learning Notes — Phases 3–4
+# Learning Notes — Phases 3–5
 
 *What these phases teach, with the project's own numbers as the worked
 examples. Written for a CFA-level finance background: the finance is
@@ -523,6 +523,94 @@ the average, whenever that is.
 
 ---
 
+## 7. Volatility-adjusted ranking: a negative result (Phase 5)
+
+### The question
+
+The MU analysis (2026-11-25) showed the RF persistently ranking the
+highest-volatility stock #1: MU's `vol_4w` was 1.34, the highest in the
+pool, and the model had learned "high vol → likely to land in the top
+return quintile". In the single-split test window (Sep 2025–Nov 2026)
+that went wrong — MU picks averaged −0.26% with a 47% win rate, and
+the highest-conviction picks preceded −22% and −23.6% weeks. The
+question was whether to fix it in the *strategy layer* instead of the
+model: keep the same RF scores, but select the top-5 by **score / vol**
+instead of raw score, so the portfolio prefers "high score *for its
+volatility*".
+
+### What was tested
+
+Same RF scores, same 20 walk-forward folds, market-cap universe
+(50 tickers, 8 years, 260 out-of-sample weeks). Three selection rules:
+raw score, `score / vol_4w`, `score / vol_12w`. MU pick statistics
+(how often MU was selected, and its realised next-week return when
+selected) were tracked per rule, so the question "did the vol
+adjustment fix the MU false picks?" is answered directly.
+
+### The numbers (pooled out-of-sample, 260 weeks)
+
+| Ranking rule | Total | CAGR | Sharpe | Max DD | Turnover | Win rate |
+|---|---|---|---|---|---|---|
+| Raw score | +561.9% | +45.9% | 1.21 | −43.4% | 0.47 | 56.2% |
+| score / vol_4w | +22.6% | +4.2% | 0.31 | −23.1% | 0.61 | 51.5% |
+| score / vol_12w | +70.2% | +11.2% | 0.74 | −19.0% | 0.49 | 53.9% |
+
+Dividing by vol crushes the return. The drawdown improvement is real
+(−43% → −23%/−19%), but the Sharpe says the trade is bad: return per
+unit of risk falls from 1.21 to 0.31/0.74.
+
+### Why it fails
+
+Dividing by vol does not just penalise high-vol stocks — it actively
+*rewards* low-vol stocks. And low-vol stocks almost never land in the
+top return quintile, which is exactly what the model predicts. The
+ranking fights the model's objective: the model is a magnitude
+predictor, and volatility is the price of magnitude. The vol_4w
+variant flatlines in the big up years (2023: +2.0% vs raw +115.7%;
+2025: +3.5% vs +70.3%; 2026: +8.8% vs +64.9%) because it holds calm
+stocks that do not move. Turnover also rises (0.61 vs 0.47) because
+volatility reshuffles the ranking every week, so the variant pays more
+in trading costs for the privilege of holding quieter stocks.
+
+### The MU nuance — the problem is the regime, not the stock
+
+Over the full five-year walk-forward, raw-score MU picks were actually
+*good*: picked in 90 of 260 weeks (34.6%), mean next-week return
++2.84%, win rate 61.1% — better than MU's overall mean next-week
+return of +1.19% across all 260 weeks. The MU problem is
+recent-regime-specific (the 2025–2026 AI unwind), not a permanent
+model flaw. The vol filter "fixes" MU by almost never picking it (9
+weeks for vol_4w, 2 weeks for vol_12w) — including during the years it
+worked. And the few vol_4w picks were mediocre (+1.54% mean) and still
+included the −16.0% worst week. Avoiding a stock entirely is not the
+same as timing it well.
+
+### What to try instead
+
+- **A vol cap, not a vol division.** Exclude the top-volatility decile
+  from selection instead of dividing by vol: it removes the extreme
+  names without rewarding the calm ones. Untested — the natural next
+  experiment.
+- **The Phase 4 regime filter for drawdown control.** It takes the
+  portfolio out of the market during selloffs instead of changing
+  which stocks are picked — the right tool for a regime problem,
+  which is what the MU failure turned out to be.
+- **Vol-weighted position sizing within the top-5.** HRP already does
+  this at 10 holdings (§3); the ranking need not carry the risk
+  adjustment alone.
+
+### Also noticed: the market-cap universe is stronger
+
+Same walk-forward setup, market-cap universe: pooled +561.9%, CAGR
++45.9%, Sharpe 1.21 — versus the name-order universe's +244%, CAGR
++28.1%, Sharpe 0.91 (Phase 3), at the same mean AUC (0.581 vs 0.580).
+Mega-cap momentum rode the 2023–2026 AI boom, and the model captured
+more of it in the concentrated universe. Universe choice moves results
+more than the model does — the same lesson as Phase 3's market-cap vs
+name-order split, now confirmed out-of-sample.
+
+---
+
 ## Talking points (for presenting the project)
 
 1. "The model has a real but modest edge: mean walk-forward AUC 0.58
@@ -548,3 +636,13 @@ the average, whenever that is.
 8. "The filter is currently OUT (SPY $722 vs 200-day MA $730 as of
    Nov 23) — the trend rule says cash until the price recovers above
    its average."
+9. "Ranking by score divided by volatility was a clear negative
+   result: it cut the pooled return from +562% to +23% (vol_4w) and
+   the Sharpe from 1.21 to 0.31. Dividing by vol rewards calm stocks
+   that never jump — it fights the model's objective, which is
+   predicting big weekly moves."
+10. "The MU problem turned out to be regime-specific, not a stock
+    problem: over five walk-forward years the model's MU picks averaged
+    +2.84% with a 61% win rate. The failures cluster in the 2025–2026
+    AI unwind, which is what the regime filter — not the ranking — is
+    for."

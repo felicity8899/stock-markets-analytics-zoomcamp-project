@@ -14,6 +14,14 @@ C. Long-short (Phase 2): long the top-N by score, short the bottom-N,
    100% gross). Phase 3 adds a configurable securities-borrow fee on the
    short leg (default 2% annualised on short notional, pro-rata weekly),
    so the long-short return can be reported with and without the fee.
+D. Inverse-vol weight (Phase 5): same top-N selection as A, but each
+   holding is weighted by the inverse of its realised volatility
+   (``vol_col``, default 4-week). A stock twice as volatile as another
+   gets half the weight. Unlike the vol cap (which removes names) or
+   score/vol ranking (which rewards calm stocks), inverse-vol sizing
+   keeps the model's selection and only shrinks the riskiest positions
+   -- the direct test of "position sizing by volatility" as a fix for
+   the MU pattern (a high-vol stock dominating the portfolio at 20%).
 
 Two simulation engines
 ----------------------
@@ -114,6 +122,23 @@ def _week_portfolio_return(
     return float((w.to_numpy() * picks["next_ret"].to_numpy()).sum())
 
 
+def _invvol_weights(picks: pd.DataFrame, vol_col: str) -> pd.Series:
+    """Inverse-volatility weights for one week's picks (Phase 5).
+
+    Weight is proportional to 1 / vol, so a stock twice as volatile as
+    another gets half the weight. A zero vol (a stock that did not move
+    for the whole window) would divide by zero, so zeros are replaced
+    by the week's median vol; NaN vol (too little history to compute
+    the rolling vol) is replaced the same way. In walk-forward folds
+    (week 104+) the vol columns are populated, so these guards only
+    bite on the earliest weeks.
+    """
+    vols = picks.set_index("ticker")[vol_col].replace(0, np.nan)
+    vols = vols.fillna(vols.median())
+    inv = 1.0 / vols
+    return inv / inv.sum()
+
+
 def simulate(
     panel: pd.DataFrame,
     prices: pd.DataFrame,
@@ -134,7 +159,8 @@ def simulate(
     panel : test panel with ``date, ticker, next_ret, score``.
     prices : long price frame (needed for HRP trailing returns).
     top_n : number of stocks held each week.
-    strategy : "equal" or "hrp".
+    strategy : "equal", "hrp", or "invvol" (Phase 5: inverse-vol
+        weights within the top-N, see module docstring).
     score_threshold : if set, only stocks with ``score`` above it are
         eligible (e.g. 0.55 for the RandomForest probability rule). Weeks
         with no eligible stock hold cash (0 return that week).
@@ -159,16 +185,16 @@ def simulate(
         a cap removes the extreme names without rewarding the calm
         ones. The quantile is computed on that week's eligible set
         only, so it is point-in-time correct.
-    vol_col : the volatility column the cap applies to (default
-        ``"vol_4w"``).
+    vol_col : the volatility column the cap applies to and that
+        inverse-vol sizing weights by (default ``"vol_4w"``).
 
     Returns
     -------
     (metrics dict, weekly DataFrame with date, ret, turnover, holdings,
     exposure).
     """
-    if strategy not in {"equal", "hrp"}:
-        raise ValueError("strategy must be 'equal' or 'hrp'")
+    if strategy not in {"equal", "hrp", "invvol"}:
+        raise ValueError("strategy must be 'equal', 'hrp' or 'invvol'")
 
     weekly_rows = []
     prev_weights: pd.Series | None = None
@@ -217,6 +243,8 @@ def simulate(
         tickers = picks["ticker"].tolist()
         if strategy == "equal":
             weights = pd.Series(1.0 / len(tickers), index=tickers)
+        elif strategy == "invvol":
+            weights = _invvol_weights(picks, vol_col)
         else:
             weights = hrp_weights_for_week(
                 prices, tickers, pd.Timestamp(date),
@@ -447,6 +475,7 @@ def simulate_exact(
     cost_bps: float = TRADING_COST_BPS,
     initial_capital: float = 100_000.0,
     hrp_lookback_weeks: int = 26,
+    vol_col: str = "vol_4w",
 ) -> tuple[dict, pd.DataFrame]:
     """Exact week-by-week simulation with explicit capital accounting.
 
@@ -480,8 +509,8 @@ def simulate_exact(
     The metrics dict additionally carries ``final_capital`` and
     ``total_costs`` (dollars).
     """
-    if strategy not in {"equal", "hrp"}:
-        raise ValueError("simulate_exact: strategy must be 'equal' or 'hrp'")
+    if strategy not in {"equal", "hrp", "invvol"}:
+        raise ValueError("simulate_exact: strategy must be 'equal', 'hrp' or 'invvol'")
 
     positions: pd.Series = pd.Series(dtype=float)  # ticker -> dollar value
     cash = float(initial_capital)
@@ -502,6 +531,8 @@ def simulate_exact(
         tickers = picks["ticker"].tolist()
         if strategy == "equal":
             weights = pd.Series(1.0 / len(tickers), index=tickers)
+        elif strategy == "invvol":
+            weights = _invvol_weights(picks, vol_col)
         else:
             weights = hrp_weights_for_week(
                 prices, tickers, pd.Timestamp(date),

@@ -44,19 +44,26 @@ simulates Strategy A with the top-N selected by ``score / vol`` instead
 of raw score (``score_vol4`` = score / 4-week realised vol,
 ``score_vol12`` = score / 12-week realised vol), and with a **vol cap**
 (top 10% most volatile names excluded each week, then ranked by raw
-score). The model itself is unchanged -- only the *selection* rule
-changes, so this is a test of the strategy layer, not the model. The
+score), and with **inverse-vol sizing** (same top-5 selection as raw,
+but each holding weighted by 1 / vol_4w instead of 20% each). The
+model itself is unchanged -- only the *selection* or *sizing* rule
+changes, so these are tests of the strategy layer, not the model. The
 motivation is the MU finding (2026-11-25): the RF persistently ranks
 the highest-volatility stock #1, because high vol makes a stock likely
 to land in the top return quintile, but the realised next-week returns
 on those picks were negative on average in the recent window. Dividing
 by vol asks the portfolio to prefer "high score *for its volatility*"
 instead of "high score, full stop"; the cap asks it to simply skip the
-extreme names without rewarding the calm ones. MU pick statistics (how
-often MU was selected, and its realised next-week return when selected)
-are reported per variant, so the question "did the vol adjustment fix
-the MU false picks?" is answered directly rather than inferred from
-the pooled return. Pooled metrics also report the **Sortino ratio**
+extreme names without rewarding the calm ones; inverse-vol sizing asks
+it to keep the model's picks but shrink the riskiest positions. MU pick
+statistics (how often MU was selected, and its realised next-week
+return when selected) are reported per variant, so the question "did
+the vol adjustment fix the MU false picks?" is answered directly rather
+than inferred from the pooled return; for the sizing variant, MU's
+weight when held and its return contribution (weight x next-week
+return, vs the 20% equal-weight contribution) are reported instead,
+because sizing changes how much MU matters, not whether it is picked.
+Pooled metrics also report the **Sortino ratio**
 (Phase 5): like Sharpe, but the denominator is downside deviation
 only, so upside jumps are not penalised -- the right risk-adjusted
 lens for a strategy whose edge is catching large up weeks.
@@ -188,6 +195,14 @@ def run_walk_forward(
     # Phase 5: vol-cap variant -- same RF scores, top-N by raw score
     # after excluding the week's top 10% most volatile names.
     oos_weekly_volcap: list[pd.DataFrame] = []
+    # Phase 5: inverse-vol sizing variant -- same top-5 selection as
+    # raw, weights by 1 / vol_4w.
+    oos_weekly_invvol: list[pd.DataFrame] = []
+    # Phase 5: MU weight diagnostics for the sizing variant -- one row
+    # per OOS week MU was in the top-5: its inverse-vol weight and its
+    # return contribution (weight x next-week return) vs the 20%
+    # equal-weight contribution on the same week.
+    mu_invvol_rows: list[dict] = []
     # Phase 5: MU pick diagnostics -- one row per OOS week per variant:
     # MU's rank within the week under that variant's ranking, and its
     # realised next-week return. A "pick" is rank <= top_n.
@@ -271,6 +286,35 @@ def run_walk_forward(
         weekly_c = weekly_c.copy()
         weekly_c["fold"] = label
         oos_weekly_volcap.append(weekly_c)
+
+        # --- Phase 5: inverse-vol sizing variant ----------------------
+        _, weekly_iv = sim_mod.simulate(
+            fold_rf, prices, top_n=top_n, strategy="invvol",
+            vol_col="vol_4w")
+        weekly_iv = weekly_iv.copy()
+        weekly_iv["fold"] = label
+        oos_weekly_invvol.append(weekly_iv)
+
+        # --- Phase 5: MU weight diagnostics (sizing variant) ----------
+        # Sizing does not change whether MU is picked -- it changes how
+        # much it weighs. Record MU's inverse-vol weight on the weeks
+        # it was in the top-5, and its return contribution under both
+        # weightings on the same week, so the comparison is apples to
+        # apples: same picks, same weeks, only the weight differs.
+        for wk_date, wk in fold_rf.groupby("date", sort=True):
+            top5 = wk.nlargest(top_n, "score")
+            w = sim_mod._invvol_weights(top5, "vol_4w")
+            mu_row = top5[top5["ticker"] == "MU"]
+            if not mu_row.empty:
+                next_ret = float(mu_row["next_ret"].iloc[0])
+                mu_w = float(w["MU"])
+                mu_invvol_rows.append({
+                    "date": wk_date,
+                    "weight": mu_w,
+                    "next_ret": next_ret,
+                    "contrib_invvol": mu_w * next_ret,
+                    "contrib_equal": (1.0 / top_n) * next_ret,
+                })
 
         # --- Phase 5: MU pick diagnostics -----------------------------
         # For each ranking rule, MU's rank within each week of this
@@ -505,16 +549,21 @@ def run_walk_forward(
     oos_v4 = pd.concat(oos_weekly_vol4, ignore_index=True)
     oos_v12 = pd.concat(oos_weekly_vol12, ignore_index=True)
     oos_vc = pd.concat(oos_weekly_volcap, ignore_index=True)
+    oos_iv = pd.concat(oos_weekly_invvol, ignore_index=True)
     pooled_v4 = sim_mod._metrics(oos_v4["ret"], oos_v4["turnover"])
     pooled_v4["strategy"] = "A (walk-forward pooled, rank by score/vol4)"
     pooled_v12 = sim_mod._metrics(oos_v12["ret"], oos_v12["turnover"])
     pooled_v12["strategy"] = "A (walk-forward pooled, rank by score/vol12)"
     pooled_vc = sim_mod._metrics(oos_vc["ret"], oos_vc["turnover"])
     pooled_vc["strategy"] = "A (walk-forward pooled, vol cap 90th pct)"
+    pooled_iv = sim_mod._metrics(oos_iv["ret"], oos_iv["turnover"])
+    pooled_iv["strategy"] = "A (walk-forward pooled, inverse-vol sizing)"
     oos_v4["year"] = pd.to_datetime(oos_v4["date"]).dt.year
     per_year_v4 = sim_mod.grouped_metrics(oos_v4, "year")
     oos_vc["year"] = pd.to_datetime(oos_vc["date"]).dt.year
     per_year_vc = sim_mod.grouped_metrics(oos_vc, "year")
+    oos_iv["year"] = pd.to_datetime(oos_iv["date"]).dt.year
+    per_year_iv = sim_mod.grouped_metrics(oos_iv, "year")
 
     # MU pick statistics per variant. "MU mean next_ret (all OOS
     # weeks)" is the reference: what MU did on average regardless of
@@ -550,12 +599,13 @@ def run_walk_forward(
 
     print("\n=== Phase 5: Strategy A with volatility-adjusted ranking ===")
     print("Same RF scores, same walk-forward folds -- only the top-N "
-          "selection rule changes (raw score vs score / vol vs vol cap).")
+          "selection or sizing rule changes.")
     comp5 = pd.DataFrame([
         {"variant": "A raw score", **pooled},
         {"variant": "A score/vol4", **pooled_v4},
         {"variant": "A score/vol12", **pooled_v12},
         {"variant": "A vol cap 90th pct", **pooled_vc},
+        {"variant": "A inverse-vol sizing", **pooled_iv},
     ])
     show_cols5 = ["variant", "weeks", "total_return", "cagr",
                   "sharpe", "sortino", "max_drawdown", "avg_turnover",
@@ -569,24 +619,63 @@ def run_walk_forward(
     print("\n=== A (vol cap 90th pct) by calendar year ===")
     print(per_year_vc.to_string(index=False,
                                 float_format=lambda v: f"{v:,.4f}"))
+    print("\n=== A (inverse-vol sizing) by calendar year ===")
+    print(per_year_iv.to_string(index=False,
+                                float_format=lambda v: f"{v:,.4f}"))
     print(f"\nMU mean next-week return over ALL {len(mu_df) // 4} "
           f"OOS weeks (any variant): {mu_all_mean:+.2%}")
     print("\n=== MU pick statistics by ranking rule ===")
     print(mu_stats.to_string(
         index=False, float_format=lambda v: f"{v:,.4f}"))
 
+    # MU under inverse-vol sizing: same picks as raw, smaller weight.
+    mu_iv = pd.DataFrame(mu_invvol_rows)
+    mu_iv_summary = {
+        "weeks_held": len(mu_iv),
+        "mean_weight_when_held": float(mu_iv["weight"].mean()),
+        "median_weight_when_held": float(mu_iv["weight"].median()),
+        "min_weight_when_held": float(mu_iv["weight"].min()),
+        "max_weight_when_held": float(mu_iv["weight"].max()),
+        "mean_next_ret_when_held": float(mu_iv["next_ret"].mean()),
+        "mean_contrib_invvol": float(mu_iv["contrib_invvol"].mean()),
+        "mean_contrib_equal": float(mu_iv["contrib_equal"].mean()),
+        "total_contrib_invvol": float(mu_iv["contrib_invvol"].sum()),
+        "total_contrib_equal": float(mu_iv["contrib_equal"].sum()),
+    }
+    print("\n=== MU under inverse-vol sizing (same picks as raw) ===")
+    print(f"MU held in {mu_iv_summary['weeks_held']} of 260 weeks; "
+          f"mean weight when held "
+          f"{mu_iv_summary['mean_weight_when_held']:.1%} "
+          f"(median {mu_iv_summary['median_weight_when_held']:.1%}, "
+          f"range {mu_iv_summary['min_weight_when_held']:.1%}–"
+          f"{mu_iv_summary['max_weight_when_held']:.1%}) "
+          f"vs 20.0% equal weight.")
+    print(f"Mean next-week return when held: "
+          f"{mu_iv_summary['mean_next_ret_when_held']:+.2%}")
+    print(f"Mean weekly contribution to portfolio return: "
+          f"{mu_iv_summary['mean_contrib_invvol']:+.2%} (invvol) vs "
+          f"{mu_iv_summary['mean_contrib_equal']:+.2%} (equal).")
+    print(f"Total contribution over all held weeks: "
+          f"{mu_iv_summary['total_contrib_invvol']:+.2%} (invvol) vs "
+          f"{mu_iv_summary['total_contrib_equal']:+.2%} (equal).")
+
     result.update({
         "pooled_metrics_vol4": pooled_v4,
         "pooled_metrics_vol12": pooled_v12,
         "pooled_metrics_volcap": pooled_vc,
+        "pooled_metrics_invvol": pooled_iv,
         "oos_weekly_vol4": oos_v4,
         "oos_weekly_vol12": oos_v12,
         "oos_weekly_volcap": oos_vc,
+        "oos_weekly_invvol": oos_iv,
         "per_year_vol4": per_year_v4,
         "per_year_volcap": per_year_vc,
+        "per_year_invvol": per_year_iv,
         "mu_pick_stats": mu_stats,
         "mu_pick_rows": mu_df,
         "mu_mean_next_ret_all_weeks": mu_all_mean,
+        "mu_invvol_rows": mu_iv,
+        "mu_invvol_summary": mu_iv_summary,
     })
 
     return result

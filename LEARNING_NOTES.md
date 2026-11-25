@@ -595,10 +595,11 @@ same as timing it well.
   portfolio out of the market during selloffs instead of changing
   which stocks are picked — the right tool for a regime problem,
   which is what the MU failure turned out to be.
-- **Vol-weighted position sizing within the top-5.** HRP already does
-  this at 10 holdings (§3); the ranking need not carry the risk
-  adjustment alone. Still untested as a standalone fix for the MU
-  pattern.
+- **Vol-weighted position sizing within the top-5.** Tested 2026-11-25
+  — inverse-vol sizing is neutral (see below): Sharpe 1.19 vs 1.21,
+  Sortino 2.07 vs 2.06, return −59 pp, drawdown −3 pp. It does no
+  damage but also no good; the vol line is closed. HRP at 10 holdings
+  (§3) remains the diversification argument, not a fix for MU.
 
 ### The vol cap: better than dividing, still worse than raw
 
@@ -634,7 +635,61 @@ blunter form: **volatility is directionless, so no vol rule can
 selectively remove the losing picks.** A rule that only sees
 magnitude cannot know the sign of next week's move.
 
-### Sortino: the right lens for this strategy
+### Inverse-vol sizing: harmless, but no help
+
+The third vol fix keeps the model's selection and only changes the
+weights: same top-5 as raw score, each holding weighted by
+1 / vol_4w instead of 20% each. Pooled out-of-sample:
+
+| Sizing rule | Total | CAGR | Sharpe | Sortino | Max DD | Turnover | Win rate |
+|---|---|---|---|---|---|---|---|
+| Equal weight (raw) | +561.9% | +45.9% | 1.21 | 2.06 | −43.4% | 0.47 | 56.2% |
+| Inverse-vol sizing | +503.0% | +43.2% | 1.19 | 2.07 | −40.4% | 0.58 | 56.9% |
+
+This is the only vol variant that does not destroy the strategy —
+but it does not improve it either. Sharpe 1.19 vs 1.21 and Sortino
+2.07 vs 2.06 are a wash; the return is ~59 pp lower over five years,
+the drawdown ~3 pp better. Per year, sizing gains a little in the
+flat and bear years (2021: +1.5% vs −3.5%; 2022: −33.3% vs −35.5%)
+and gives back more in the bull years (2025: +49.7% vs +70.3%; 2026:
++56.0% vs +64.9%). Turnover rises (0.58 vs 0.47) because the weights
+drift every week as volatilities change, so part of the return gap is
+trading costs.
+
+On MU the sizing works mechanically but does not help: MU is held in
+the same 90 weeks as raw (same picks), at a mean weight of 16.4%
+(median 15.9%, range 5.8%–40.9%) instead of 20% — and note the top of
+that range: when MU is *relatively* calm versus the other four picks,
+inverse-vol gives it *more* than 20%, up to 40.9%. Its total return
+contribution over the held weeks falls from +51.09% (equal) to
++44.63% (sized) — but MU's picks were net positive over the five
+years (+2.84% mean), so shrinking them cost return. The sizing did
+exactly what it was asked to do; the premise was wrong. The MU
+problem is concentrated in the recent regime, and no weighting rule
+can know which regime a pick belongs to.
+
+### Where the vol line ends
+
+Three vol fixes, one pattern:
+
+| Fix | Pooled total | Sharpe | Sortino | Verdict |
+|---|---|---|---|---|
+| Raw score | +561.9% | 1.21 | 2.06 | baseline |
+| Score / vol_4w | +22.6% | 0.31 | 0.46 | destroys the strategy |
+| Score / vol_12w | +70.2% | 0.74 | 1.15 | destroys the strategy |
+| Vol cap 90th pct | +275.3% | 0.99 | 1.64 | halves the return |
+| Inverse-vol sizing | +503.0% | 1.19 | 2.07 | neutral — no gain, small cost |
+
+The vol fixes fail for the same reason in different degrees:
+volatility is directionless, and the model's edge is magnitude. Any
+rule that uses vol to *select* fights the model; a rule that uses vol
+only to *size* does no damage but also no good. The remaining
+vol-adjacent idea is HRP at 10 holdings (§3), which sizes by the full
+covariance rather than single-stock vol — but that is a
+diversification argument, not a fix for the MU pattern, and its edge
+at 10 holdings was already established in Phase 3. The MU pattern
+itself is a regime problem, and the regime filter (Phase 4) is the
+tool for it — not the ranking, not the cap, not the sizing.
 
 The Sortino ratio (added Phase 5, `simulate._metrics`) is Sharpe
 with downside deviation in the denominator instead of total
@@ -704,3 +759,9 @@ name-order split, now confirmed out-of-sample.
    than Sharpe: raw score's Sortino is 2.06 against a Sharpe of 1.21,
    because the edge is upside magnitude and Sharpe treats a +30% week
    as risk. Sortino is now reported alongside Sharpe in every table."
+12. "Inverse-vol sizing was the only vol fix that did not destroy the
+   strategy — and it still did not help: Sharpe 1.19 vs 1.21, Sortino
+   2.07 vs 2.06, return −59 pp over five years. Sizing by vol does no
+   damage because it keeps the model's picks, but it cannot fix a
+   regime problem either. The vol line is closed: division, cap, and
+   sizing all tested, none adopted."

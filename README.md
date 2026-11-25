@@ -31,7 +31,7 @@ strategies in industry.
 | Allocation | Equal weight vs Hierarchical Risk Parity (HRP) | HRP (López de Prado 2016) needs no expected returns and no covariance inversion, so weights are stable out-of-sample |
 | Strategies | Long-only (equal / HRP) + long-short (Phase 2) | Long-short (long top 5 / short bottom 5, dollar-neutral) tests whether the model identifies losers as well as winners, and hedges market risk |
 | Risk overlay | 200-day MA regime filter (Phase 4, Faber 2007) | Invested when SPY is above its 200-day MA, cash when below — gates *whether* the long-only strategy is invested, not which stocks it picks; cuts the 2022 drawdown by more than half |
-| Selection rule | Raw score, or score / vol, or vol cap (Phase 5) | Phase 5 tested ranking the top-5 by score divided by realised vol, and a vol cap (exclude the week's top-vol decile) — both negative results vs raw score (+562% → +23%/+275% pooled, Sharpe 1.21 → 0.31/0.99); vol is directionless, so no vol rule can selectively remove losing picks |
+| Selection rule | Raw score, or score / vol, or vol cap, or inverse-vol sizing (Phase 5) | Phase 5 tested ranking the top-5 by score divided by realised vol, a vol cap (exclude the week's top-vol decile), and inverse-vol sizing — division and cap both lose clearly to raw score; sizing is a wash (Sharpe 1.19 vs 1.21, Sortino 2.07 vs 2.06, return −59 pp). None adopted: vol is directionless, so no vol rule can selectively remove losing picks |
 | Simulation | Vector backtest + exact row-by-row simulation (Phase 2) | The exact engine tracks capital/positions/cash in dollars and reinvests gains; it must reconcile with the vector backtest (gap < 0.05 pp) |
 | Benchmark | SPY buy-and-hold | The realistic alternative for the same capital |
 | Costs | 5 bps one-way on traded notional + 2%/yr borrow fee on the short leg (Phase 3) | Keeps the backtest honest; the fee is reported side by side with the no-fee run so its drag is visible |
@@ -57,9 +57,9 @@ strategies in industry.
 │   ├── models.py            # RandomForest, FF factor regression, XGBoost
 │   ├── lstm_model.py        # LSTM comparison model (Phase 2; needs tensorflow)
 │   ├── hrp.py               # Hierarchical Risk Parity (from scratch, scipy)
-│   ├── walkforward.py       # Phase 3 walk-forward validation (expanding window, per-fold AUC + strategy metrics); Phase 4 filtered comparison; Phase 5 vol-adjusted ranking + vol cap + MU pick diagnostics
+│   ├── walkforward.py       # Phase 3 walk-forward validation (expanding window, per-fold AUC + strategy metrics); Phase 4 filtered comparison; Phase 5 vol-adjusted ranking + vol cap + inverse-vol sizing + MU pick/weight diagnostics
 │   ├── regime.py            # Phase 4 200-day MA regime filter (Faber 2007): daily SPY, weekly exposure, current state
-│   └── simulate.py          # vector backtest, long-short (+ borrow fee, Phase 3), exact simulation, benchmark, grouped metrics; Phase 5 rank_col + vol cap + Sortino ratio
+│   └── simulate.py          # vector backtest, long-short (+ borrow fee, Phase 3), exact simulation, benchmark, grouped metrics; Phase 5 rank_col + vol cap + inverse-vol sizing + Sortino ratio
 ├── scripts/
 │   ├── build_notebooks.py   # generates the notebooks in notebooks/
 │   ├── precompute_walkforward.py  # regenerates dashboard_data/walkforward_results.json
@@ -275,15 +275,15 @@ but the top-5 are selected by **score / vol** instead of raw score —
 `score / vol_4w` and `score / vol_12w`. Full explanation:
 [LEARNING_NOTES.md](LEARNING_NOTES.md) §7.
 
-| Pooled (260 weeks) | Raw score | score / vol_4w | score / vol_12w | Vol cap 90th pct |
-|---|---|---|---|---|
-| Total return | **+561.9%** | +22.6% | +70.2% | +275.3% |
-| CAGR | **+45.9%** | +4.2% | +11.2% | +30.3% |
-| Sharpe | **1.21** | 0.31 | 0.74 | 0.99 |
-| Sortino | **2.06** | 0.46 | 1.15 | 1.64 |
-| Max drawdown | −43.4% | **−23.1%** | **−19.0%** | −36.5% |
-| Avg turnover | 0.47 | 0.61 | 0.49 | 0.60 |
-| Win rate | 56.2% | 51.5% | 53.9% | 53.9% |
+| Pooled (260 weeks) | Raw score | score / vol_4w | score / vol_12w | Vol cap 90th pct | Inverse-vol sizing |
+|---|---|---|---|---|---|
+| Total return | **+561.9%** | +22.6% | +70.2% | +275.3% | +503.0% |
+| CAGR | **+45.9%** | +4.2% | +11.2% | +30.3% | +43.2% |
+| Sharpe | **1.21** | 0.31 | 0.74 | 0.99 | 1.19 |
+| Sortino | 2.06 | 0.46 | 1.15 | 1.64 | **2.07** |
+| Max drawdown | −43.4% | **−23.1%** | **−19.0%** | −36.5% | −40.4% |
+| Avg turnover | 0.47 | 0.61 | 0.49 | 0.60 | 0.58 |
+| Win rate | 56.2% | 51.5% | 53.9% | 53.9% | **56.9%** |
 
 **A clear negative result: do not adopt either vol adjustment.**
 Dividing by vol crushes the return (+562% → +23%/+70%) and the Sharpe
@@ -315,6 +315,22 @@ are not penalised — the right lens for a strategy whose edge is
 catching large up weeks. Raw score: Sortino 2.06 vs Sharpe 1.21. It
 does not change the variant ranking, but it shows the strategy's edge
 more honestly. See [LEARNING_NOTES.md](LEARNING_NOTES.md) §7.
+
+**Inverse-vol sizing: harmless, but no help.** Same top-5 as raw
+score, each holding weighted by 1 / vol_4w instead of 20% each:
++503.0% total, Sharpe 1.19, Sortino 2.07 — a wash against raw on both
+risk-adjusted measures, ~59 pp less return over five years for a 3 pp
+drawdown improvement (−40.4% vs −43.4%). It is the only vol variant
+that does not destroy the strategy, because it keeps the model's
+selection and only changes weights. On MU it works mechanically — same
+90 held weeks as raw, mean weight 16.4% instead of 20% (range
+5.8%–40.9%; when MU is relatively calm versus the other picks it gets
+*more* than 20%) — but MU's picks were net positive over five years,
+so shrinking them cost return (total contribution +44.63% vs +51.09%
+equal-weighted). **The vol line is closed:** division, cap, and sizing
+all tested, none adopted. Volatility is directionless and the model's
+edge is magnitude; the MU pattern is a regime problem, and the Phase 4
+regime filter is the tool for it.
 
 **MU pick statistics — the problem is the regime, not the stock.**
 Over the full five-year walk-forward, raw-score MU picks were actually

@@ -41,6 +41,10 @@ strategies in industry.
 ```
 ├── README.md
 ├── LEARNING_NOTES.md        # Phase 3-4 learning write-up (walk-forward, borrow fees, HRP, stability, trend following)
+├── app.py                   # Streamlit observation dashboard (tabs: regime, picks, ranking, strategies, walk-forward, about)
+├── requirements-app.txt     # slim dashboard requirements (Streamlit + pipeline deps, no TF/XGBoost)
+├── dashboard_data/
+│   └── walkforward_results.json  # precomputed walk-forward results for the dashboard (see scripts/precompute_walkforward.py)
 ├── requirements.txt
 ├── Dockerfile               # containerised weekly run (build-untested: no Docker in the dev VM)
 ├── .dockerignore
@@ -57,6 +61,7 @@ strategies in industry.
 │   └── simulate.py          # vector backtest, long-short (+ borrow fee, Phase 3), exact simulation, benchmark, grouped metrics
 ├── scripts/
 │   ├── build_notebooks.py   # generates the notebooks in notebooks/
+│   ├── precompute_walkforward.py  # regenerates dashboard_data/walkforward_results.json
 │   ├── weekly_run.sh        # weekly cron entry point (refresh + retrain + predict)
 │   └── crontab.example      # documented crontab line (no live job installed)
 ├── notebooks/
@@ -143,6 +148,42 @@ Docker, the same weekly run works from cron: `scripts/weekly_run.sh`
 refreshes data, retrains, and logs to `logs/weekly_YYYY-MM-DD.log`;
 `scripts/crontab.example` documents the Monday 08:00 ET crontab line.
 No live cron job is installed by this project -- install it deliberately.
+
+## Dashboard
+
+An observation interface for the whole system — no commands, just open
+it in a browser:
+
+- **Regime**: the 200-day MA filter as a big IN/OUT badge, SPY vs its
+  200-day MA (values, as-of date, 2-year chart).
+- **This week's picks**: top-5 long / bottom-5 short tables (ticker,
+  close, RF score) with a universe toggle (market-cap / name order),
+  plus a ticker search (rank, score, close for any ticker in the
+  universe — e.g. NVDA).
+- **Full ranking**: all 50 stocks, sortable, with score bars.
+- **Strategies**: standard-run backtest metrics + equity curves.
+- **Walk-forward**: precomputed validation results (pooled metrics,
+  per-year table, equity curve) — see
+  `scripts/precompute_walkforward.py` for how the numbers are
+  generated.
+- **About**: how the model picks stocks, what the score means
+  (baseline 0.20, not 0.50), the regime filter, and the honest caveats.
+
+Run it locally:
+
+```bash
+pip install -r requirements-app.txt   # slim: Streamlit + pipeline deps only
+streamlit run app.py                  # http://localhost:8501
+```
+
+The app uses only the RandomForest for live picks (fast); LSTM/XGBoost
+are skipped on purpose. Data is cached for 12 hours in the app; the
+sidebar "Refresh data" button clears the cache and re-downloads from
+yfinance. On a cold start (e.g. Render free tier after spin-down) the
+app re-downloads everything — under a minute — because the free-tier
+filesystem does not persist the `data/` cache. Macro source is FRED
+when the `FRED_API_KEY` environment variable is set, otherwise the
+yfinance proxies (set it in the Render dashboard, never in a file).
 
 ## Results (Phase 4)
 

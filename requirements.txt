@@ -14,3 +14,6 @@ matplotlib>=3.8
 jupyter>=1.0
 ipykernel>=6.0
 nbformat>=5.0
+# Dashboard (app.py): Streamlit observation interface. The Render deploy
+# uses the slimmer requirements-app.txt instead (no XGBoost/TensorFlow).
+streamlit>=1.30

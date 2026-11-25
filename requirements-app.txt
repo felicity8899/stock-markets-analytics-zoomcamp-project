@@ -1,0 +1,13 @@
+# Slim requirements for the Streamlit dashboard (Render deploy).
+# The dashboard uses only the RandomForest model -- no XGBoost,
+# TensorFlow/LSTM, or notebooks -- so the install stays small and fast.
+# The full pipeline requirements (including those) live in
+# requirements.txt.
+streamlit>=1.30
+yfinance>=0.2.40
+pandas>=2.0
+numpy>=1.26
+scikit-learn>=1.4
+scipy>=1.11
+pyarrow>=14.0
+requests>=2.31

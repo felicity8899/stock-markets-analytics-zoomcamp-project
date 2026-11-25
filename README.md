@@ -152,7 +152,11 @@ No live cron job is installed by this project -- install it deliberately.
 ## Dashboard
 
 An observation interface for the whole system — no commands, just open
-it in a browser:
+it in a browser: **https://stock-markets-dashboard.onrender.com**
+
+(Render free tier: the service spins down after ~15 minutes idle, so
+the first visit after a pause takes up to a minute to wake up and
+re-download data.)
 
 - **Regime**: the 200-day MA filter as a big IN/OUT badge, SPY vs its
   200-day MA (values, as-of date, 2-year chart).

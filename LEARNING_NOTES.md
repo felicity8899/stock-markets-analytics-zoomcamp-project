@@ -589,15 +589,65 @@ same as timing it well.
 
 - **A vol cap, not a vol division.** Exclude the top-volatility decile
   from selection instead of dividing by vol: it removes the extreme
-  names without rewarding the calm ones. Untested — the natural next
-  experiment.
+  names without rewarding the calm ones. Tested 2026-11-25 — see
+  below. Also a negative result, though less bad than dividing.
 - **The Phase 4 regime filter for drawdown control.** It takes the
   portfolio out of the market during selloffs instead of changing
   which stocks are picked — the right tool for a regime problem,
   which is what the MU failure turned out to be.
 - **Vol-weighted position sizing within the top-5.** HRP already does
   this at 10 holdings (§3); the ranking need not carry the risk
-  adjustment alone.
+  adjustment alone. Still untested as a standalone fix for the MU
+  pattern.
+
+### The vol cap: better than dividing, still worse than raw
+
+Same walk-forward, same folds, one more variant: rank by raw score,
+but first exclude each week's top 10% most volatile names
+(`vol_4w` above the week's 90th percentile). Pooled out-of-sample:
+
+| Ranking rule | Total | CAGR | Sharpe | Sortino | Max DD | Turnover |
+|---|---|---|---|---|---|---|
+| Raw score | +561.9% | +45.9% | 1.21 | 2.06 | −43.4% | 0.47 |
+| Vol cap 90th pct | +275.3% | +30.3% | 0.99 | 1.64 | −36.5% | 0.60 |
+| score / vol_12w | +70.2% | +11.2% | 0.74 | 1.15 | −19.0% | 0.49 |
+| score / vol_4w | +22.6% | +4.2% | 0.31 | 0.46 | −23.1% | 0.61 |
+
+The cap preserves far more of the return than dividing by vol
+(+275% vs +23%/+70%), but it still gives up about half the raw
+total for a 7 pp drawdown improvement, and it loses on both Sharpe
+(0.99 vs 1.21) and Sortino (1.64 vs 2.06). Per year, the cap helps in
+the bear year (2022: −25.4% vs raw −35.5%) and hurts in every bull
+year (2023: +61.1% vs +115.7%; 2025: +45.0% vs +70.3%; 2026: +44.7%
+vs +64.9%) — the highest-vol names are often the biggest winners in
+bull years, so trimming them trims the upside. Turnover also rises
+(0.60 vs 0.47): the eligible set reshuffles weekly as vol
+percentiles shift, so the cap pays more in trading costs.
+
+On MU specifically the cap does not fix the picks either: it picks MU
+in 51 of 260 weeks (vs 90 for raw), but those picks average +0.72%
+with a 43.1% win rate — *worse* than raw's +2.84% and 61.1% — and it
+still catches a −22.0% week. The cap removed MU's good weeks along
+with its bad ones, because volatility does not discriminate up-moves
+from down-moves. That is the same lesson as the division test, in a
+blunter form: **volatility is directionless, so no vol rule can
+selectively remove the losing picks.** A rule that only sees
+magnitude cannot know the sign of next week's move.
+
+### Sortino: the right lens for this strategy
+
+The Sortino ratio (added Phase 5, `simulate._metrics`) is Sharpe
+with downside deviation in the denominator instead of total
+volatility: only returns below the 0% minimum acceptable return
+count as risk. For this strategy the gap between the two is large —
+raw score: Sortino **2.06** vs Sharpe 1.21; vol cap: 1.64 vs 0.99;
+score/vol_12w: 1.15 vs 0.74. The strategy's edge is upside magnitude
+(big up weeks), and Sharpe treats a +30% week as risk while Sortino
+does not. Sortino does not change the variant ranking (raw > cap >
+vol_12w > vol_4w under both), but it is the more honest risk-adjusted
+lens for this strategy, so it is reported alongside Sharpe in every
+table from Phase 5 on (`_metrics`, `grouped_metrics`,
+`metrics_table`).
 
 ### Also noticed: the market-cap universe is stronger
 
@@ -640,9 +690,17 @@ name-order split, now confirmed out-of-sample.
    result: it cut the pooled return from +562% to +23% (vol_4w) and
    the Sharpe from 1.21 to 0.31. Dividing by vol rewards calm stocks
    that never jump — it fights the model's objective, which is
-   predicting big weekly moves."
+   predicting big weekly moves. A vol cap (excluding the top 10% most
+   volatile names) did better than dividing but still lost to raw
+   score (+275% vs +562%, Sharpe 0.99 vs 1.21) — volatility is
+   directionless, so no vol rule can selectively remove the losing
+   picks."
 10. "The MU problem turned out to be regime-specific, not a stock
     problem: over five walk-forward years the model's MU picks averaged
     +2.84% with a 61% win rate. The failures cluster in the 2025–2026
     AI unwind, which is what the regime filter — not the ranking — is
     for."
+11. "Sortino is the more honest risk-adjusted lens for this strategy
+   than Sharpe: raw score's Sortino is 2.06 against a Sharpe of 1.21,
+   because the edge is upside magnitude and Sharpe treats a +30% week
+   as risk. Sortino is now reported alongside Sharpe in every table."

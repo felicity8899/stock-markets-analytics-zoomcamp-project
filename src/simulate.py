@@ -76,6 +76,21 @@ def _metrics(weekly_ret: pd.Series, turnover: pd.Series) -> dict:
     cagr = float((1.0 + total_ret) ** (WEEKS_PER_YEAR / n) - 1.0)
     vol = float(weekly_ret.std(ddof=1))
     sharpe = float(weekly_ret.mean() / vol * np.sqrt(WEEKS_PER_YEAR)) if vol > 0 else 0.0
+    # Sortino ratio (Phase 5): like Sharpe, but the denominator is
+    # downside deviation only -- the square root of the mean squared
+    # downside, where downside is the return below the 0% minimum
+    # acceptable return (the project's Sharpe also uses rf = 0, so the
+    # two are directly comparable). Upside jumps are not penalised,
+    # which matters for a strategy whose edge is catching large up
+    # weeks: Sharpe treats a +30% week as risk, Sortino does not.
+    # A strategy that wins by big up weeks and loses by small down
+    # weeks has a Sortino well above its Sharpe; one that wins small
+    # and loses big has a Sortino below its Sharpe.
+    downside = np.minimum(weekly_ret.to_numpy(), 0.0)
+    downside_dev = float(np.sqrt((downside ** 2).mean()))
+    sortino = float(
+        weekly_ret.mean() / downside_dev * np.sqrt(WEEKS_PER_YEAR)
+    ) if downside_dev > 0 else 0.0
     equity = (1.0 + weekly_ret).cumprod()
     running_max = equity.cummax()
     max_dd = float(((equity - running_max) / running_max).min())
@@ -84,6 +99,7 @@ def _metrics(weekly_ret: pd.Series, turnover: pd.Series) -> dict:
         "total_return": total_ret,
         "cagr": cagr,
         "sharpe": sharpe,
+        "sortino": sortino,
         "max_drawdown": max_dd,
         "avg_turnover": float(turnover.mean()) if len(turnover) else 0.0,
         "win_rate": float((weekly_ret > 0).mean()),
@@ -108,6 +124,8 @@ def simulate(
     hrp_lookback_weeks: int = 26,
     exposure: pd.Series | None = None,
     rank_col: str = "score",
+    vol_cap_quantile: float | None = None,
+    vol_col: str = "vol_4w",
 ) -> tuple[dict, pd.DataFrame]:
     """Run a vector backtest over the scored test panel.
 
@@ -134,6 +152,15 @@ def simulate(
         ``"score"``). Phase 5: pass a volatility-adjusted ranking such
         as ``"score_vol4"`` (score / 4-week realised vol) to rank by
         risk-adjusted score instead of raw model probability.
+    vol_cap_quantile : Phase 5 (vol cap): if set, exclude stocks whose
+        ``vol_col`` is above this cross-sectional quantile *within the
+        week* before selecting the top-N (e.g. 0.9 excludes the top
+        10% most volatile names that week). Unlike dividing by vol,
+        a cap removes the extreme names without rewarding the calm
+        ones. The quantile is computed on that week's eligible set
+        only, so it is point-in-time correct.
+    vol_col : the volatility column the cap applies to (default
+        ``"vol_4w"``).
 
     Returns
     -------
@@ -169,6 +196,15 @@ def simulate(
         eligible = week
         if score_threshold is not None:
             eligible = week[week["score"] >= score_threshold]
+        if vol_cap_quantile is not None:
+            # Phase 5 vol cap: drop the week's most volatile names
+            # before ranking. NaN vol (a stock with too little history
+            # to compute the rolling vol) compares False and is dropped
+            # with the capped names -- in walk-forward folds (week
+            # 104+) the vol columns are populated, so this only bites
+            # on the earliest weeks.
+            cap = eligible[vol_col].quantile(vol_cap_quantile)
+            eligible = eligible[eligible[vol_col] <= cap]
         picks = eligible.nlargest(top_n, rank_col)
         if picks.empty:
             weekly_rows.append(
@@ -248,6 +284,7 @@ def metrics_table(results: dict[str, dict]) -> pd.DataFrame:
             "total_return": m.get("total_return"),
             "CAGR": m.get("cagr"),
             "Sharpe": m.get("sharpe"),
+            "Sortino": m.get("sortino"),
             "max_drawdown": m.get("max_drawdown"),
             "avg_turnover": m.get("avg_turnover"),
             "win_rate": m.get("win_rate"),
@@ -378,7 +415,7 @@ def grouped_metrics(weekly: pd.DataFrame, group_col: str) -> pd.DataFrame:
         m["end"] = pd.to_datetime(g["date"]).max().date()
         rows.append(m)
     cols = [group_col, "weeks", "start", "end", "total_return", "cagr",
-            "sharpe", "max_drawdown", "avg_turnover", "win_rate"]
+            "sharpe", "sortino", "max_drawdown", "avg_turnover", "win_rate"]
     return pd.DataFrame(rows)[cols]
 
 

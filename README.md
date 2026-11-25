@@ -31,7 +31,7 @@ strategies in industry.
 | Allocation | Equal weight vs Hierarchical Risk Parity (HRP) | HRP (López de Prado 2016) needs no expected returns and no covariance inversion, so weights are stable out-of-sample |
 | Strategies | Long-only (equal / HRP) + long-short (Phase 2) | Long-short (long top 5 / short bottom 5, dollar-neutral) tests whether the model identifies losers as well as winners, and hedges market risk |
 | Risk overlay | 200-day MA regime filter (Phase 4, Faber 2007) | Invested when SPY is above its 200-day MA, cash when below — gates *whether* the long-only strategy is invested, not which stocks it picks; cuts the 2022 drawdown by more than half |
-| Selection rule | Raw score, or score / vol (Phase 5) | Phase 5 tested ranking the top-5 by score divided by realised vol instead of raw score — a clear negative result (+562% → +23% pooled, Sharpe 1.21 → 0.31); dividing by vol rewards calm stocks that never jump, fighting the model's objective |
+| Selection rule | Raw score, or score / vol, or vol cap (Phase 5) | Phase 5 tested ranking the top-5 by score divided by realised vol, and a vol cap (exclude the week's top-vol decile) — both negative results vs raw score (+562% → +23%/+275% pooled, Sharpe 1.21 → 0.31/0.99); vol is directionless, so no vol rule can selectively remove losing picks |
 | Simulation | Vector backtest + exact row-by-row simulation (Phase 2) | The exact engine tracks capital/positions/cash in dollars and reinvests gains; it must reconcile with the vector backtest (gap < 0.05 pp) |
 | Benchmark | SPY buy-and-hold | The realistic alternative for the same capital |
 | Costs | 5 bps one-way on traded notional + 2%/yr borrow fee on the short leg (Phase 3) | Keeps the backtest honest; the fee is reported side by side with the no-fee run so its drag is visible |
@@ -41,7 +41,7 @@ strategies in industry.
 
 ```
 ├── README.md
-├── LEARNING_NOTES.md        # Phase 3-4 learning write-up (walk-forward, borrow fees, HRP, stability, trend following)
+├── LEARNING_NOTES.md        # Phase 3-5 learning write-up (walk-forward, borrow fees, HRP, stability, trend following, vol-adjusted ranking, Sortino)
 ├── app.py                   # Streamlit observation dashboard (tabs: regime, picks, ranking, strategies, walk-forward, about)
 ├── requirements-app.txt     # slim dashboard requirements (Streamlit + pipeline deps, no TF/XGBoost)
 ├── dashboard_data/
@@ -57,9 +57,9 @@ strategies in industry.
 │   ├── models.py            # RandomForest, FF factor regression, XGBoost
 │   ├── lstm_model.py        # LSTM comparison model (Phase 2; needs tensorflow)
 │   ├── hrp.py               # Hierarchical Risk Parity (from scratch, scipy)
-│   ├── walkforward.py       # Phase 3 walk-forward validation (expanding window, per-fold AUC + strategy metrics); Phase 4 filtered comparison; Phase 5 vol-adjusted ranking + MU pick diagnostics
+│   ├── walkforward.py       # Phase 3 walk-forward validation (expanding window, per-fold AUC + strategy metrics); Phase 4 filtered comparison; Phase 5 vol-adjusted ranking + vol cap + MU pick diagnostics
 │   ├── regime.py            # Phase 4 200-day MA regime filter (Faber 2007): daily SPY, weekly exposure, current state
-│   └── simulate.py          # vector backtest, long-short (+ borrow fee, Phase 3), exact simulation, benchmark, grouped metrics; Phase 5 rank_col (rank top-N by any column, e.g. score/vol)
+│   └── simulate.py          # vector backtest, long-short (+ borrow fee, Phase 3), exact simulation, benchmark, grouped metrics; Phase 5 rank_col + vol cap + Sortino ratio
 ├── scripts/
 │   ├── build_notebooks.py   # generates the notebooks in notebooks/
 │   ├── precompute_walkforward.py  # regenerates dashboard_data/walkforward_results.json
@@ -275,24 +275,46 @@ but the top-5 are selected by **score / vol** instead of raw score —
 `score / vol_4w` and `score / vol_12w`. Full explanation:
 [LEARNING_NOTES.md](LEARNING_NOTES.md) §7.
 
-| Pooled (260 weeks) | Raw score | score / vol_4w | score / vol_12w |
-|---|---|---|---|
-| Total return | **+561.9%** | +22.6% | +70.2% |
-| CAGR | **+45.9%** | +4.2% | +11.2% |
-| Sharpe | **1.21** | 0.31 | 0.74 |
-| Max drawdown | −43.4% | **−23.1%** | **−19.0%** |
-| Avg turnover | 0.47 | 0.61 | 0.49 |
-| Win rate | 56.2% | 51.5% | 53.9% |
+| Pooled (260 weeks) | Raw score | score / vol_4w | score / vol_12w | Vol cap 90th pct |
+|---|---|---|---|---|
+| Total return | **+561.9%** | +22.6% | +70.2% | +275.3% |
+| CAGR | **+45.9%** | +4.2% | +11.2% | +30.3% |
+| Sharpe | **1.21** | 0.31 | 0.74 | 0.99 |
+| Sortino | **2.06** | 0.46 | 1.15 | 1.64 |
+| Max drawdown | −43.4% | **−23.1%** | **−19.0%** | −36.5% |
+| Avg turnover | 0.47 | 0.61 | 0.49 | 0.60 |
+| Win rate | 56.2% | 51.5% | 53.9% | 53.9% |
 
-**A clear negative result: do not adopt it.** Dividing by vol crushes
-the return (+562% → +23%/+70%) and the Sharpe (1.21 → 0.31/0.74).
-The drawdown improvement is real but not worth the give-up. The
-mechanism: dividing by vol does not just penalise high-vol stocks, it
-actively *rewards* low-vol stocks — and low-vol stocks almost never
-land in the top return quintile, which is exactly what the model
-predicts. The ranking fights the model's objective. The vol_4w variant
-flatlines in the big up years (2023: +2.0% vs raw +115.7%; 2025: +3.5%
-vs +70.3%) because it holds calm stocks that do not move.
+**A clear negative result: do not adopt either vol adjustment.**
+Dividing by vol crushes the return (+562% → +23%/+70%) and the Sharpe
+(1.21 → 0.31/0.74). The drawdown improvement is real but not worth the
+give-up. The mechanism: dividing by vol does not just penalise
+high-vol stocks, it actively *rewards* low-vol stocks — and low-vol
+stocks almost never land in the top return quintile, which is exactly
+what the model predicts. The ranking fights the model's objective. The
+vol_4w variant flatlines in the big up years (2023: +2.0% vs raw
++115.7%; 2025: +3.5% vs +70.3%) because it holds calm stocks that do
+not move.
+
+**The vol cap did better than dividing, but still lost to raw.**
+Excluding each week's top 10% most volatile names, then ranking by raw
+score: +275.3% total, Sharpe 0.99, Sortino 1.64 — about half the raw
+return for a 7 pp drawdown improvement (−36.5% vs −43.4%). Per year it
+helps in the bear year (2022: −25.4% vs −35.5%) and hurts in every bull
+year (2023: +61.1% vs +115.7%; 2025: +45.0% vs +70.3%). Turnover also
+rises (0.60 vs 0.47). On MU it does not fix the picks either: 51 of
+260 weeks picked, averaging +0.72% with a 43.1% win rate — *worse*
+than raw's +2.84% and 61.1% — and it still catches a −22.0% week. The
+cap removed MU's good weeks along with its bad ones, because
+volatility does not discriminate up-moves from down-moves: **no vol
+rule can selectively remove the losing picks.**
+
+**Sortino is now reported alongside Sharpe everywhere.** Sortino is
+Sharpe with downside deviation in the denominator, so upside jumps
+are not penalised — the right lens for a strategy whose edge is
+catching large up weeks. Raw score: Sortino 2.06 vs Sharpe 1.21. It
+does not change the variant ranking, but it shows the strategy's edge
+more honestly. See [LEARNING_NOTES.md](LEARNING_NOTES.md) §7.
 
 **MU pick statistics — the problem is the regime, not the stock.**
 Over the full five-year walk-forward, raw-score MU picks were actually
